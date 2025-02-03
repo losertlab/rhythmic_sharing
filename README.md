@@ -4,6 +4,13 @@ Artificial neural networks train by finding optimal weights, which are the stren
 
 Yet the living neural networks of brains can rapidly infer contextual changes in real-time, adapt their behavior in accordance with this new environment, and even induce how the organism should act in an unencountered environment. I introduce a learning paradigm that associates learning with the coordination of oscillations of link strength. The paradigm is inspired by the physics of oscillatory rhythms of the mechanical structures that support synapses. I find that it yields rapid adaptation and learning in neural networks while maintaining robustness. Links can rapidly change their coordination of oscillations, endowing the network with the ability to sense subtle context changes in an unsupervised manner. In other words, the network generates the missing contextual tokens required to perform as a generalist AI architecture, capable of predicting dynamics in multiple contexts. Furthermore, the oscillations themselves allow the network to extrapolate dynamics to never-seen-before contexts. My oscillation-based learning paradigm provides a starting point for novel models of learning and cognition. Because it is agnostic to the specific details of the neural network architecture, this paradigm also opens the door for introducing rapid adaptation and learning capabilities into leading AI models.
 
+## What is included in this repository
+
+**thomas.csv** : 	CSV file of nonstationary data of Thomas system. This file is used in the example Python notebook that runs the algorithm (see below).
+**rhythmic_sharing_example.ipynb** : Example usage with nonstationary data from the Thomas system
+**thomas_data_generate.nb** : Mathematica notebook used to generate data of Thomas system
+
+
 ## Compatibility
 Python 3.9.13
 
