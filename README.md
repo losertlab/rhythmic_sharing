@@ -6,11 +6,11 @@ Yet the living neural networks of brains can rapidly infer contextual changes in
 
 ## What is included in this repository
 
-**thomas.csv** : 	CSV file of nonstationary data of Thomas system. This file is used in the example Python notebook that runs the algorithm (see below).
+- **thomas.csv** : 	CSV file of nonstationary data of Thomas system. This file is used in the example Python notebook that runs the algorithm (see below).
 
-**rhythmic_sharing_example.ipynb** : Example usage with nonstationary data from the Thomas system
+- **rhythmic_sharing_example.ipynb** : Example usage with nonstationary data from the Thomas system
 
-**thomas_data_generate.nb** : Mathematica notebook used to generate data of Thomas system
+- **thomas_data_generate.nb** : Mathematica notebook used to generate data of Thomas system
 
 
 ## Compatibility
