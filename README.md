@@ -18,7 +18,9 @@ This model utilizes dynamical systems theory and homotopy theory. Specifically, 
 
 ## Compatibility
 Python 3.9.13
+
 Mathematica 13.2.0.0 (only used for sample data generation; not necessary to run for the algorithm)
+
 No GPU is needed. For the Thomas system, runtime is on the order of seconds if executing the code locally on your laptop.
 
 ## Intellectual property notice
