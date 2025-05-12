@@ -25,18 +25,20 @@ class RhythmicNetwork:
         self.input_dims = kwargs.get('input_dims', None)
 
         self.average_degree_links = self.num_nodes // 2
-        self.link_network = self.gen_link_network()
-        self.nonzero_link_idxs = np.where(np.ndarray.flatten(self.link_network.toarray())!=0)[0]
+        self.node_adj_matrix = self.gen_node_adj_matrix()
+        self.nonzero_adj_idxs = np.where(np.ndarray.flatten(self.node_adj_matrix.toarray())!=0)[0]
         self.incidence_matrix_T, self.incidence_normalization = self.gen_incidence_matrix_T()
+        self.input_weights = self.gen_input_weights()
+        self.num_links = np.count_nonzero(self.node_adj_matrix.toarray())
 
-    def gen_link_network(self):
+    def gen_node_adj_matrix(self):
         unbounded_links = sparse.random(self.num_nodes, self.num_nodes, density=self.average_degree/self.num_nodes, random_state=self.model_seed)
         bounded_links = 2*unbounded_links - unbounded_links.ceil()
         link_eigenvalues = linalg.eigs(bounded_links, k=1, return_eigenvectors=False)
         return self.spectral_radius/np.abs(link_eigenvalues[0])*bounded_links
 
     def gen_incidence_matrix_T(self):
-        link_graph = nx.from_numpy_array(self.link_network, parallel_edges=True, create_using=nx.DiGraph())
+        link_graph = nx.from_numpy_array(self.node_adj_matrix, parallel_edges=True, create_using=nx.DiGraph())
         nodelist = list(link_graph)
         if link_graph.is_multigraph():
             edgelist = list(link_graph.edges(keys=True))
@@ -67,4 +69,11 @@ class RhythmicNetwork:
             incidence_normalization[i] = np.count_nonzero(incidence_matrix_T[i])
         return incidence_matrix_T, incidence_normalization
 
-
+    def gen_input_weights(self):
+        qq = int(np.floor(self.num_nodes/self.input_dims))
+        input_weights = np.zeros((self.num_nodes, self.input_dims))
+        for i in range(self.input_dims):
+            np.random.seed(i)
+            ip = 2*np.random.rand(qq) - 1
+            input_weights[i*qq:(i+1)*qq, i] = self.input_weight*ip
+        return input_weights
