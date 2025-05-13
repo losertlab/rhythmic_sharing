@@ -6,7 +6,7 @@ import networkx as nx
 
 class RhythmicNetwork:
     def __init__(self, **kwargs):
-        self.tau = kwargs.get('tau', 1)
+        self.dt = kwargs.get('dt', 1)
         self.average_degree_nodes = kwargs.get('average_degree_nodes', 10)
         self.num_nodes = kwargs.get('num_nodes', 100)
         self.link_dist = kwargs.get('link_dist', 'discrete')
@@ -29,11 +29,13 @@ class RhythmicNetwork:
         self.average_degree_links = self.num_nodes // 2
         self.node_adj_matrix = self.gen_node_adj_matrix()
         self.nonzero_adj_idxs = np.where(np.ndarray.flatten(self.node_adj_matrix.toarray())!=0)[0]
-        self.node_incidence_T, self.node_incidence_norm = self.gen_node_incidence_T()
+        self.incidence_T, self.incidence_norm = self.gen_incidence_T()
         self.input_weights = self.gen_input_weights()
         self.num_links = np.count_nonzero(self.node_adj_matrix.toarray())
         self.link_adj_matrix, self.link_adj_norm = self.gen_link_adj_matrix()
         self.natural_frequencies = self.gen_natural_frequencies()
+        self.node_states, self.link_states = self.gen_initial_states()
+        self.node_states_history, self.link_states_history = [], []
 
     def gen_node_adj_matrix(self):
         unbounded_links = sparse.random(self.num_nodes, self.num_nodes, density=self.average_degree_nodes/self.num_nodes, random_state=self.model_seed)
@@ -41,7 +43,7 @@ class RhythmicNetwork:
         link_eigenvalues = linalg.eigs(bounded_links, k=1, return_eigenvectors=False)
         return self.spectral_radius/np.abs(link_eigenvalues[0])*bounded_links
 
-    def gen_node_incidence_T(self):
+    def gen_incidence_T(self):
         link_graph = nx.from_numpy_array(self.node_adj_matrix, parallel_edges=True, create_using=nx.DiGraph())
         nodelist = list(link_graph)
         if link_graph.is_multigraph():
@@ -99,3 +101,23 @@ class RhythmicNetwork:
             natural_frequencies[np.where(natural_frequencies!=0)[0]] = np.random.normal(loc=self.omega0_mean, scale=self.omega0_spread, size=np.where(natural_frequencies!=0)[0].shape[0])
         return natural_frequencies
 
+    def gen_initial_states(self):
+        node_states = np.zeros((self.num_nodes))
+        link_states = np.zeros((self.num_links))
+        for i in range(self.num_links):
+            np.random.seed(i)
+            link_states[i] = np.random.rand(1)[0]*2*np.pi
+        return node_states, link_states
+
+    def advance_network(self, input_state):
+        link_phases = np.zeros((self.num_nodes**2))
+        link_phases[self.nonzero_adj_idxs] = self.link_states
+        link_phases = np.reshape(link_phases, (self.num_nodes, self.num_nodes))
+        modulated_node_adj_matrix = self.node_adj_matrix.toarray()*(1-(self.link_strength_change_ratio/2)*(1+np.sin(link_phases)))
+        self.node_states = self.leakage*self.node_states + (1-self.leakage)*np.tanh(modulated_node_adj_matrix.dot(self.node_states) + self.input_weights @ input_state + self.bias_nodes)
+
+        r_x = self.link_adj_matrix.dot(np.cos(self.link_states)) * (1/self.link_adj_norm)
+        r_y = self.link_adj_matrix.dot(np.sin(self.link_states)) * (1/self.link_adj_norm)
+        local_mean_phase = np.arctan2(r_y, r_x)
+        forcing = (self.epsilon1 + self.epsilon2*(self.incidence_T @ (self.node_states+1)/2) * (1/self.incidence_norm)) * np.sin(local_mean_phase-self.link_states+self.bias_phase)
+        self.link_states = self.link_states + self.dt*(self.natural_frequencies + forcing)
