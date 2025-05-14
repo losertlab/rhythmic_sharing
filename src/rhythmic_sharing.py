@@ -109,7 +109,7 @@ class RhythmicNetwork:
             link_states[i] = np.random.rand(1)[0]*2*np.pi
         return node_states, link_states
 
-    def advance_network(self, input_state):
+    def advance_network(self, input_state, save_history=True):
         link_phases = np.zeros((self.num_nodes**2))
         link_phases[self.nonzero_adj_idxs] = self.link_states
         link_phases = np.reshape(link_phases, (self.num_nodes, self.num_nodes))
@@ -121,3 +121,10 @@ class RhythmicNetwork:
         local_mean_phase = np.arctan2(r_y, r_x)
         forcing = (self.epsilon1 + self.epsilon2*(self.incidence_T @ (self.node_states+1)/2) * (1/self.incidence_norm)) * np.sin(local_mean_phase-self.link_states+self.bias_phase)
         self.link_states = self.link_states + self.dt*(self.natural_frequencies + forcing)
+        
+        if save_history:
+            self.node_states_history.append(self.node_states)
+            self.link_states_history.append(self.link_states)
+
+    def get_history(self):
+        return np.asarray(self.node_states_history).T, np.asarray(self.link_states_history).T
