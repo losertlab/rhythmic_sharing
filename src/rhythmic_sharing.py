@@ -3,6 +3,7 @@ import numpy as np
 import scipy.sparse as sparse
 from scipy.sparse import linalg
 import networkx as nx
+from sklearn.linear_model import Ridge
 
 class RhythmicNetwork:
     def __init__(self, **kwargs):
@@ -14,7 +15,7 @@ class RhythmicNetwork:
         self.omega0_mean = kwargs.get('omega0_mean', self.omega0)
         self.omega0_spread = kwargs.get('omega0_spread', self.omega0/3)
         self.input_weight = kwargs.get('input_weight', 120e-2)
-        self.epsilon1 = kwargs.get('epsilon1', 0.2)
+        self.epsilon1 = kwargs.get('epsilon1', -0.2)
         self.epsilon2 = kwargs.get('epsilon2', 0.6)
         self.leakage = kwargs.get('leakage', 0.0)
         self.spectral_radius = kwargs.get('spectral_radius', 0.6)
@@ -35,7 +36,7 @@ class RhythmicNetwork:
         self.link_adj_matrix, self.link_adj_norm = self.gen_link_adj_matrix()
         self.natural_frequencies = self.gen_natural_frequencies()
         self.node_states, self.link_states = self.gen_initial_states()
-        self.node_states_history, self.link_states_history = [], []
+        self.node_states_history, self.link_states_history, self.training_data_history = [self.node_states], [self.link_states], []
 
     def gen_node_adj_matrix(self):
         unbounded_links = sparse.random(self.num_nodes, self.num_nodes, density=self.average_degree_nodes/self.num_nodes, random_state=self.model_seed)
@@ -109,7 +110,7 @@ class RhythmicNetwork:
             link_states[i] = np.random.rand(1)[0]*2*np.pi
         return node_states, link_states
 
-    def advance_network(self, input_state, save_history=True):
+    def advance(self, input_state, save_history=True):
         link_phases = np.zeros((self.num_nodes**2))
         link_phases[self.nonzero_adj_idxs] = self.link_states
         link_phases = np.reshape(link_phases, (self.num_nodes, self.num_nodes))
@@ -119,12 +120,27 @@ class RhythmicNetwork:
         r_x = self.link_adj_matrix.dot(np.cos(self.link_states)) * (1/self.link_adj_norm)
         r_y = self.link_adj_matrix.dot(np.sin(self.link_states)) * (1/self.link_adj_norm)
         local_mean_phase = np.arctan2(r_y, r_x)
-        forcing = (self.epsilon1 + self.epsilon2*(self.incidence_T @ (self.node_states+1)/2) * (1/self.incidence_norm)) * np.sin(local_mean_phase-self.link_states+self.bias_phase)
+        self.local_mean_phase = local_mean_phase
+        #forcing = (self.epsilon1 + self.epsilon2*((self.incidence_T @ (self.node_states+1)/2)) * (1/self.incidence_norm)) * np.sin(local_mean_phase-self.link_states+self.bias_phase)
+        forcing = np.sin((local_mean_phase-self.link_states)+self.bias_phase)*(self.epsilon1+self.epsilon2*np.multiply(np.matmul(self.incidence_T, (self.node_states+1)/2), 1/self.incidence_norm))
+        self.test = np.sin
+        self.forcing = forcing
         self.link_states = self.link_states + self.dt*(self.natural_frequencies + forcing)
         
         if save_history:
             self.node_states_history.append(self.node_states)
             self.link_states_history.append(self.link_states)
+            self.training_data_history.append(input_state)
 
     def get_history(self):
-        return np.asarray(self.node_states_history).T, np.asarray(self.link_states_history).T
+        return np.asarray(self.node_states_history).T, np.asarray(self.link_states_history).T, np.asarray(self.training_data_history).T
+
+    def get_global_parameters(self):
+        R_x = np.average(np.cos(np.asarray(self.link_states_history).T), axis=0)
+        R_y = np.average(np.sin(np.asarray(self.link_states_history).T), axis=0)
+        return (R_x**2 + R_y**2)**(1/2), np.arctan2(R_y, R_x)
+
+    def get_output_weights(self):
+        ridge_model = Ridge(alpha=self.regularization)
+        ridge_model.fit(np.asarray(self.node_states_history), np.asarray(self.training_data_history))
+        return ridge_model.coef_
