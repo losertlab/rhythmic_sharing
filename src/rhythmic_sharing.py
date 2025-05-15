@@ -32,6 +32,7 @@ class RhythmicNetwork:
         self.nonzero_adj_idxs = np.where(np.ndarray.flatten(self.node_adj_matrix.toarray())!=0)[0]
         self.incidence_T, self.incidence_norm = self.gen_incidence_T()
         self.input_weights = self.gen_input_weights()
+        self.output_weights = None
         self.num_links = np.count_nonzero(self.node_adj_matrix.toarray())
         self.link_adj_matrix, self.link_adj_norm = self.gen_link_adj_matrix()
         self.natural_frequencies = self.gen_natural_frequencies()
@@ -120,17 +121,19 @@ class RhythmicNetwork:
         r_x = self.link_adj_matrix.dot(np.cos(self.link_states)) * (1/self.link_adj_norm)
         r_y = self.link_adj_matrix.dot(np.sin(self.link_states)) * (1/self.link_adj_norm)
         local_mean_phase = np.arctan2(r_y, r_x)
-        self.local_mean_phase = local_mean_phase
-        #forcing = (self.epsilon1 + self.epsilon2*((self.incidence_T @ (self.node_states+1)/2)) * (1/self.incidence_norm)) * np.sin(local_mean_phase-self.link_states+self.bias_phase)
-        forcing = np.sin((local_mean_phase-self.link_states)+self.bias_phase)*(self.epsilon1+self.epsilon2*np.multiply(np.matmul(self.incidence_T, (self.node_states+1)/2), 1/self.incidence_norm))
-        self.test = np.sin
-        self.forcing = forcing
+        forcing = (self.epsilon1 + self.epsilon2*((self.incidence_T @ (self.node_states+1)/2)) * (1/self.incidence_norm)) * np.sin(local_mean_phase-self.link_states+self.bias_phase)
         self.link_states = self.link_states + self.dt*(self.natural_frequencies + forcing)
         
         if save_history:
             self.node_states_history.append(self.node_states)
             self.link_states_history.append(self.link_states)
             self.training_data_history.append(input_state)
+
+    def train(self, training_data, warmup_time=0):
+        for t in range(warmup_time):
+            self.advance(training_data[:, t], save_history=False)
+        for t in range(warmup_time, training_data.shape[1]):
+            self.advance(training_data[:, t])
 
     def get_history(self):
         return np.asarray(self.node_states_history).T, np.asarray(self.link_states_history).T, np.asarray(self.training_data_history).T
@@ -143,4 +146,5 @@ class RhythmicNetwork:
     def get_output_weights(self):
         ridge_model = Ridge(alpha=self.regularization)
         ridge_model.fit(np.asarray(self.node_states_history), np.asarray(self.training_data_history))
+        self.output_weights = ridge_model.coef_
         return ridge_model.coef_
