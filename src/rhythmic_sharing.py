@@ -2,6 +2,7 @@ import scipy as sp
 import numpy as np
 import scipy.sparse as sparse
 from scipy.sparse import linalg
+from scipy.linalg import pinv
 import networkx as nx
 from sklearn.linear_model import Ridge
 
@@ -28,7 +29,7 @@ class RhythmicNetwork:
         self.input_dims = kwargs.get('input_dims', None)
         self.frozen = False
         self.mean_phase_threshold = kwargs.get('mean_phase_threshold', np.pi)
-        self.mean_phase_tolerance = kwargs.get('mean_phase_threshold', 1e-3)
+        self.mean_phase_tolerance = kwargs.get('mean_phase_tolerance', 1e-3)
         self.error_threshold = kwargs.get('error_threshold', 1e-3)
         self.error_tolerance = kwargs.get('error_tolerance', 1e-3)
 
@@ -108,11 +109,11 @@ class RhythmicNetwork:
             natural_frequencies[np.where(natural_frequencies!=0)[0]] = np.random.normal(loc=self.omega0_mean, scale=self.omega0_spread, size=np.where(natural_frequencies!=0)[0].shape[0])
         return natural_frequencies
 
-    def gen_initial_states(self):
+    def gen_initial_states(self, seed_offset=0):
         node_states = np.zeros((self.num_nodes))
         link_states = np.zeros((self.num_links))
         for i in range(self.num_links):
-            np.random.seed(i)
+            np.random.seed(i+seed_offset)
             link_states[i] = np.random.rand(1)[0]*2*np.pi
         return node_states, link_states
 
@@ -123,8 +124,8 @@ class RhythmicNetwork:
         modulated_node_adj_matrix = self.node_adj_matrix.toarray()*(1-(self.link_strength_change_ratio/2)*(1+np.sin(link_phases)))
         self.node_states = self.leakage*self.node_states + (1-self.leakage)*np.tanh(modulated_node_adj_matrix.dot(self.node_states) + self.input_weights @ input_state + self.bias_nodes)
         if save_history:
-            self.node_states_history.append(self.node_states)
-            self.training_data_history.append(input_state)
+            self.node_states_history.append(np.copy(self.node_states))
+            self.training_data_history.append(np.copy(input_state))
 
     def advance_links(self, save_history=True, freezing=False):
         r_x_local = self.link_adj_matrix.dot(np.cos(self.link_states)) * (1/self.link_adj_norm)
@@ -137,25 +138,49 @@ class RhythmicNetwork:
         if not freezing:
             forcing = (self.epsilon1 + self.epsilon2*((self.incidence_T @ (self.node_states+1)/2)) * (1/self.incidence_norm)) * np.sin(local_mean_phase-self.link_states+self.bias_phase)
             self.link_states = self.link_states + self.dt*(self.natural_frequencies + forcing)
-        elif self.frozen or (np.abs(global_mean_phase-self.mean_phase_threshold) < self.mean_phase_tolerance and self.prediction_error < self.error_tolerance):
-            self.frozen = True
         else:
-            self.link_states = self.link_states + self.dt*self.omega0
+            self.frozen = self.frozen or (np.abs(global_mean_phase-self.mean_phase_threshold) < self.mean_phase_tolerance and self.prediction_error < self.error_tolerance)
+            if not self.frozen:
+                self.link_states = self.link_states + self.dt*self.omega0
         
         if save_history:
-            self.link_states_history.append(self.link_states)
+            self.link_states_history.append(np.copy(self.link_states))
 
-    def train(self, training_data, warmup_time=0):
-        for t in range(warmup_time):
-            self.advance_nodes(training_data[:, t], save_history=False)
-            self.advance_links(save_history=False)
-        for t in range(warmup_time, training_data.shape[1]):
-            self.advance_nodes(training_data[:, t])
-            self.advance_links()
-        ridge_model = Ridge(alpha=self.regularization)
-        ridge_model.fit(np.asarray(self.node_states_history), np.asarray(self.training_data_history))
-        self.output_weights = ridge_model.coef_
-        return self.output_weights
+    def train(self, training_data, warmup_time=0, type='auto'):
+        if type != 'manual':
+            for t in range(warmup_time):
+                self.advance_nodes(training_data[:, t], save_history=False)
+                self.advance_links(save_history=False)
+            self.node_states_history.append(np.copy(self.node_states))
+            for t in range(warmup_time, training_data.shape[1]-1):
+                self.advance_nodes(training_data[:, t])
+                self.advance_links()
+            self.training_data_history.append(np.copy(training_data[:, training_data.shape[1]-1]))
+            ridge_model = Ridge(alpha=self.regularization)
+            ridge_model.fit(np.asarray(self.node_states_history), np.asarray(self.training_data_history))
+            self.output_weights = ridge_model.coef_
+        else:
+            for t in range(warmup_time):
+                self.advance_nodes(training_data[:, t], save_history=False)
+                self.advance_links(save_history=False)
+            self.node_states_history.append(np.copy(self.node_states))
+            for t in range(warmup_time, training_data.shape[1]-1):
+                self.advance_nodes(training_data[:, t])
+                self.advance_links()
+            self.training_data_history.append(np.copy(training_data[:, training_data.shape[1]-1]))
+
+            identity1 = self.regularization*sparse.identity(self.num_nodes)
+            training_data = np.asarray(self.training_data_history).T
+            node_history = np.asarray(self.node_states_history).T
+            identity2 = np.identity(training_data.shape[1])
+            wout=np.zeros((training_data.shape[0],self.num_nodes))
+
+            thingy1= np.matmul(np.matmul(training_data,identity2),np.transpose(node_history))
+            # Y_target * X^T
+
+            thingy2= pinv(np.matmul(np.matmul(node_history,identity2),np.transpose(node_history))+ identity1)
+            wout= np.matmul(thingy1,thingy2) 
+            self.output_weights = wout
 
     def get_history(self):
         return np.asarray(self.node_states_history).T, np.asarray(self.link_states_history).T, np.asarray(self.training_data_history).T, np.asarray(self.prediction_history).T
@@ -163,18 +188,27 @@ class RhythmicNetwork:
     def get_global_parameters(self):
         R_x = np.average(np.cos(np.asarray(self.link_states_history).T), axis=0)
         R_y = np.average(np.sin(np.asarray(self.link_states_history).T), axis=0)
-        return (R_x**2 + R_y**2)**(1/2), np.arctan2(R_y, R_x)
+        global_synchrony, global_mean_phase = (R_x**2 + R_y**2)**(1/2), np.arctan(R_y, R_x)
+        return global_synchrony, global_mean_phase
 
-    def predict(self, training_data, warmup_time=0, freezing_time=float('inf')):
-        self.node_states, self.link_states = self.gen_initial_states()
-        self.prediction_history.append(self.output_weights @ self.node_states)
+    def predict(self, test_data, warmup_time=0, freezing_time=float('inf'), prediction_time=0):
+        self.node_states, self.link_states = self.gen_initial_states(seed_offset=2)
+        self.prediction_history.append(np.copy(self.output_weights @ self.node_states))
+        self.node_states_history, self.link_states_history = [], []
+        self.node_states_history.append(np.copy(self.node_states))
+        self.link_states_history.append(np.copy(self.link_states))
         for t in range(warmup_time):
-            self.prediction_error = np.sum(self.prediction_history[-1]-training_data[:, t], axis=0)**2
-            self.advance_nodes(training_data[:, t])
+            self.prediction_error = np.sum(self.prediction_history[-1]-test_data[:, t], axis=0)**2
+            self.advance_nodes(test_data[:, t])
             if t < freezing_time:
                 self.advance_links()
             else:
                 self.advance_links(freezing=True)
-            self.prediction_history.append(self.output_weights @ self.node_states)
+            self.prediction_history.append(np.copy(self.output_weights @ self.node_states))
+        for t in range(warmup_time, warmup_time+prediction_time):
+            self.advance_nodes(self.prediction_history[-1])
+            self.advance_links(freezing=True)
+            self.prediction_history.append(np.copy(self.output_weights @ self.node_states))
+
             
 
