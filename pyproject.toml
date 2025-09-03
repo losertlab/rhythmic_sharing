@@ -1,0 +1,14 @@
+[project]
+name = "rhythmic-sharing"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "stonesoup>=1.7",
+]
+
+[dependency-groups]
+dev = [
+    "jupyter>=1.1.1",
+]
