@@ -17,8 +17,8 @@ class RhythmicModel(GaussianTransitionModel):
         return self.input_dims
 
     def function(self, state, noise=False, **kwargs) -> StateVector:
-        #self.rhythmic_network.advance(state.state_vector, save_history=True)
-        print(state.state_vector.shape)
+        if state.state_vector.shape[1] == 1:
+            self.rhythmic_network.advance(state.state_vector[:,0], save_history=True)
         return state.state_vector
 
     def covar(self, time_interval, **kwargs):
