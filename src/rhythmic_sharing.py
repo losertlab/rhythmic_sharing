@@ -146,29 +146,25 @@ class RhythmicNetwork:
         if save_history:
             self.link_states_history.append(np.copy(self.link_states))
 
-    def train(self, training_data, warmup_time=0, type='auto'):
-        if type != 'manual':
-            for t in range(warmup_time):
-                self.advance_nodes(training_data[:, t], save_history=False)
-                self.advance_links(save_history=False)
-            self.node_states_history.append(np.copy(self.node_states))
-            for t in range(warmup_time, training_data.shape[1]-1):
-                self.advance_nodes(training_data[:, t])
-                self.advance_links()
-            self.training_data_history.append(np.copy(training_data[:, training_data.shape[1]-1]))
+    def advance(self, input_state, save_history=True, freezing=False):
+        self.advance_nodes(input_state, save_history=save_history)
+        self.advance_links(save_history=save_history, freezing=freezing)
+
+    def train(self, training_data, warmup_time=0, reg_type='auto'):
+        for t in range(warmup_time):
+            self.advance(training_data[:, t], save_history=False)
+        self.node_states_history.append(np.copy(self.node_states))
+        for t in range(warmup_time, training_data.shape[1]-1):
+            self.advance(training_data[:, t])
+        self.training_data_history.append(np.copy(training_data[:, training_data.shape[1]-1]))
+        self.compute_weights(reg_type=reg_type)
+
+    def compute_weights(self, reg_type='auto'):
+        if reg_type != 'manual':
             ridge_model = Ridge(alpha=self.regularization)
             ridge_model.fit(np.asarray(self.node_states_history), np.asarray(self.training_data_history))
             self.output_weights = ridge_model.coef_
         else:
-            for t in range(warmup_time):
-                self.advance_nodes(training_data[:, t], save_history=False)
-                self.advance_links(save_history=False)
-            self.node_states_history.append(np.copy(self.node_states))
-            for t in range(warmup_time, training_data.shape[1]-1):
-                self.advance_nodes(training_data[:, t])
-                self.advance_links()
-            self.training_data_history.append(np.copy(training_data[:, training_data.shape[1]-1]))
-
             identity1 = self.regularization*sparse.identity(self.num_nodes)
             training_data = np.asarray(self.training_data_history).T
             node_history = np.asarray(self.node_states_history).T
@@ -200,14 +196,10 @@ class RhythmicNetwork:
         for t in range(warmup_time):
             self.prediction_error = np.sum(self.prediction_history[-1]-test_data[:, t], axis=0)**2
             self.advance_nodes(test_data[:, t])
-            if t < freezing_time:
-                self.advance_links()
-            else:
-                self.advance_links(freezing=True)
+            self.advance(test_data[:, t], freezing=(t >= freezing_time))
             self.prediction_history.append(np.copy(self.output_weights @ self.node_states))
         for t in range(warmup_time, warmup_time+prediction_time):
-            self.advance_nodes(self.prediction_history[-1])
-            self.advance_links(freezing=True)
+            self.advance(self.prediction_history[-1], freezing=True)
             self.prediction_history.append(np.copy(self.output_weights @ self.node_states))
 
             

@@ -5,6 +5,8 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "networkx>=3.5",
+    "scikit-learn>=1.7.1",
     "stonesoup>=1.7",
 ]
 
