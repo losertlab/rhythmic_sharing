@@ -16,6 +16,7 @@ class RhythmicNetwork:
         self.omega0_mean = kwargs.get('omega0_mean', self.omega0)
         self.omega0_spread = kwargs.get('omega0_spread', self.omega0/3)
         self.input_weight = kwargs.get('input_weight', 120e-2)
+        self.input_weight_assign_to = kwargs.get('input_weight_assign_to', None)
         self.epsilon1 = kwargs.get('epsilon1', -0.2)
         self.epsilon2 = kwargs.get('epsilon2', 0.6)
         self.leakage = kwargs.get('leakage', 0.0)
@@ -26,19 +27,25 @@ class RhythmicNetwork:
         self.regularization = kwargs.get('regularization', 1e-20)
         self.bias_phase = kwargs.get('bias_phase', 0)
         self.model_seed = kwargs.get('model_seed', 0)
-        self.input_dims = kwargs.get('input_dims', None)
+        self.input_dims = kwargs.get('input_dims', 3)
         self.frozen = False
         self.mean_phase_threshold = kwargs.get('mean_phase_threshold', np.pi)
         self.mean_phase_tolerance = kwargs.get('mean_phase_tolerance', 1e-3)
         self.error_threshold = kwargs.get('error_threshold', 1e-3)
         self.error_tolerance = kwargs.get('error_tolerance', 1e-3)
 
+        if not np.isscalar(self.input_weight) and not self.input_weight_assign_to:
+            assert False, "Must pass in 'input_weight_assign_to' if 'input_weight' is a list"
+        elif not np.isscalar(self.input_weight):
+            assert np.sum(self.input_weight_assign_to) == self.input_dims, "Sum of 'input_weight_assign_to' must equal 'input_dims'"
+            self.input_weight_assign_to = np.cumsum(self.input_weight_assign_to)
+
         self.average_degree_links = self.num_nodes // 2
         self.node_adj_matrix = self.gen_node_adj_matrix()
         self.nonzero_adj_idxs = np.where(np.ndarray.flatten(self.node_adj_matrix.toarray())!=0)[0]
         self.incidence_T, self.incidence_norm = self.gen_incidence_T()
         self.input_weights = self.gen_input_weights()
-        self.output_weights = None
+        self.output_weights = np.zeros((self.input_dims, self.num_nodes))
         self.num_links = np.count_nonzero(self.node_adj_matrix.toarray())
         self.link_adj_matrix, self.link_adj_norm = self.gen_link_adj_matrix()
         self.natural_frequencies = self.gen_natural_frequencies()
@@ -84,12 +91,15 @@ class RhythmicNetwork:
         return incidence_matrix_T, incidence_normalization
 
     def gen_input_weights(self):
-        qq = int(np.floor(self.num_nodes/self.input_dims))
+        qq = self.num_nodes // self.input_dims
         input_weights = np.zeros((self.num_nodes, self.input_dims))
         for i in range(self.input_dims):
             np.random.seed(i)
             ip = 2*np.random.rand(qq) - 1
-            input_weights[i*qq:(i+1)*qq, i] = self.input_weight*ip
+            if np.isscalar(self.input_weight):
+                input_weights[i*qq:(i+1)*qq, i] = self.input_weight*ip
+            else:
+                input_weights[i*qq:(i+1)*qq, i] = self.input_weight[np.sort(np.where(self.input_weight_assign_to > i)[0])[0]]*ip
         return input_weights
 
     def gen_link_adj_matrix(self):
@@ -161,7 +171,7 @@ class RhythmicNetwork:
 
     def compute_weights(self, reg_type='auto'):
         if reg_type != 'manual':
-            ridge_model = Ridge(alpha=self.regularization)
+            ridge_model = Ridge(alpha=self.regularization, fit_intercept=False)
             ridge_model.fit(np.asarray(self.node_states_history), np.asarray(self.training_data_history))
             self.output_weights = ridge_model.coef_
         else:
@@ -187,6 +197,9 @@ class RhythmicNetwork:
         global_synchrony, global_mean_phase = (R_x**2 + R_y**2)**(1/2), np.arctan(R_y, R_x)
         return global_synchrony, global_mean_phase
 
+    def get_output(self):
+        return np.copy(self.output_weights @ self.node_states)
+
     def predict(self, test_data, warmup_time=0, freezing_time=float('inf'), prediction_time=0):
         self.node_states, self.link_states = self.gen_initial_states(seed_offset=2)
         self.prediction_history.append(np.copy(self.output_weights @ self.node_states))
@@ -195,12 +208,11 @@ class RhythmicNetwork:
         self.link_states_history.append(np.copy(self.link_states))
         for t in range(warmup_time):
             self.prediction_error = np.sum(self.prediction_history[-1]-test_data[:, t], axis=0)**2
-            self.advance_nodes(test_data[:, t])
             self.advance(test_data[:, t], freezing=(t >= freezing_time))
-            self.prediction_history.append(np.copy(self.output_weights @ self.node_states))
+            self.prediction_history.append(self.get_output())
         for t in range(warmup_time, warmup_time+prediction_time):
             self.advance(self.prediction_history[-1], freezing=True)
-            self.prediction_history.append(np.copy(self.output_weights @ self.node_states))
+            self.prediction_history.append(self.get_output())
 
             
 
