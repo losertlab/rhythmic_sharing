@@ -15,6 +15,7 @@ class RhythmicNetwork:
         self.omega0_mean = kwargs.get('omega0_mean', self.omega0)
         self.omega0_spread = kwargs.get('omega0_spread', self.omega0/3)
         self.input_weight = kwargs.get('input_weight', 120e-2)
+        self.input_weight_assign_to = kwargs.get('input_weight_assign_to', None)
         self.epsilon1 = kwargs.get('epsilon1', -0.2)
         self.epsilon2 = kwargs.get('epsilon2', 0.6)
         self.leakage = kwargs.get('leakage', 0.0)
@@ -32,6 +33,12 @@ class RhythmicNetwork:
         self.error_threshold = kwargs.get('error_threshold', 1e-3)
         self.error_tolerance = kwargs.get('error_tolerance', 1e-3)
 
+        if not np.isscalar(self.input_weight) and not self.input_weight_assign_to:
+            assert False, "Must pass in 'input_weight_assign_to' if 'input_weight' is a list"
+        elif not np.isscalar(self.input_weight):
+            assert np.sum(self.input_weight_assign_to) == self.input_dims, "Sum of 'input_weight_assign_to' must equal 'input_dims'"
+            self.input_weight_assign_to = np.cumsum(self.input_weight_assign_to)
+
         self.average_degree_links = self.num_nodes // 2
         self.node_adj_matrix = self.gen_node_adj_matrix()
         self.nonzero_adj_idxs = np.where(np.ndarray.flatten(self.node_adj_matrix.toarray())!=0)[0]
@@ -43,6 +50,7 @@ class RhythmicNetwork:
         self.natural_frequencies = self.gen_natural_frequencies()
         self.node_states, self.link_states = self.gen_initial_states()
         self.node_states_history, self.link_states_history, self.training_data_history, self.prediction_history = [], [], [], []
+        self.node_to_link_coupling_history, self.local_mean_phase_history = [], []
 
     def gen_node_adj_matrix(self):
         unbounded_links = sparse.random(self.num_nodes, self.num_nodes, density=self.average_degree_nodes/self.num_nodes, random_state=self.model_seed)
@@ -83,12 +91,16 @@ class RhythmicNetwork:
         return incidence_matrix_T, incidence_normalization
 
     def gen_input_weights(self):
-        qq = int(np.floor(self.num_nodes/self.input_dims))
+        qq = self.num_nodes // self.input_dims
         input_weights = np.zeros((self.num_nodes, self.input_dims))
         for i in range(self.input_dims):
             np.random.seed(i)
             ip = 2*np.random.rand(qq) - 1
-            input_weights[i*qq:(i+1)*qq, i] = self.input_weight*ip
+            if np.isscalar(self.input_weight):
+                input_weights[i*qq:(i+1)*qq, i] = self.input_weight*ip
+            else:
+                
+                input_weights[i*qq:(i+1)*qq, i] = self.input_weight[np.sort(np.where(self.input_weight_assign_to > i)[0])[0]]*ip
         return input_weights
 
     def gen_link_adj_matrix(self):
@@ -125,6 +137,7 @@ class RhythmicNetwork:
         if save_history:
             self.node_states_history.append(self.node_states)
             self.training_data_history.append(input_state)
+            self.node_to_link_coupling_history.append((self.incidence_T @ ((self.node_states+1)/2)) / self.incidence_norm)
 
     def advance_links(self, save_history=True, freezing=False):
         r_x_local = self.link_adj_matrix.dot(np.cos(self.link_states)) * (1/self.link_adj_norm)
@@ -143,18 +156,28 @@ class RhythmicNetwork:
             self.link_states = self.link_states + self.dt*self.omega0
         
         if save_history:
+            self.local_mean_phase_history.append(local_mean_phase)
             self.link_states_history.append(self.link_states)
-
-    def train(self, training_data, warmup_time=0):
+                
+    def train(self, training_data, warmup_time=0, reset=True, save_link_history=True):
+        # Reset training data
+        if reset:
+            self.node_states, self.link_states = self.gen_initial_states()
+            self.node_states_history, self.training_data_history = [], []
+       
+        # Run training
         for t in range(warmup_time):
             self.advance_nodes(training_data[:, t], save_history=False)
             self.advance_links(save_history=False)
         for t in range(warmup_time, training_data.shape[1]):
             self.advance_nodes(training_data[:, t])
-            self.advance_links()
-        ridge_model = Ridge(alpha=self.regularization)
+            self.advance_links(save_history=save_link_history)
+        
+        # Fit output weights
+        ridge_model = Ridge(alpha=self.regularization, fit_intercept=False)
         ridge_model.fit(np.asarray(self.node_states_history), np.asarray(self.training_data_history))
         self.output_weights = ridge_model.coef_
+        
         return self.output_weights
 
     def get_history(self):
@@ -165,16 +188,110 @@ class RhythmicNetwork:
         R_y = np.average(np.sin(np.asarray(self.link_states_history).T), axis=0)
         return (R_x**2 + R_y**2)**(1/2), np.arctan2(R_y, R_x)
 
-    def predict(self, training_data, warmup_time=0, freezing_time=float('inf')):
-        self.node_states, self.link_states = self.gen_initial_states()
+    def get_input_parameters(self):
+        inp_rs = []
+        inp_ph = []
+        for inp in range(self.input_weights.shape[1]):
+            links_from_input = []
+            inp_nodes = self.input_weights[:, inp].nonzero()[0]
+            for i in inp_nodes:
+                _, connected_nodes = self.node_adj_matrix[i, :].nonzero()
+                for j in connected_nodes:
+                    flat_idx = i * self.num_nodes + j
+                    links_from_input.append(np.where(flat_idx == self.nonzero_adj_idxs)[0][0])
+            links_from_input = np.asarray(links_from_input).astype(int)
+            R_x = np.average(np.cos(np.asarray(self.link_states_history).T[links_from_input]), axis=0)
+            R_y = np.average(np.sin(np.asarray(self.link_states_history).T[links_from_input]), axis=0)
+            inp_rs.append((R_x**2 + R_y**2)**(1/2))
+            inp_ph.append(np.arctan2(R_y, R_x))
+        return np.asarray(inp_rs), np.asarray(inp_ph)
+
+    def predict(self, training_data, warmup_time=0, freezing_time=float('inf'), reset=True, channels_using_sample=None):
+        # Reset prediction data
+        if reset:
+            self.prediction_history = []
+            self.node_states, self.link_states = self.gen_initial_states()
+        
+        # Run prediction loop (warmup then regular)
         self.prediction_history.append(self.output_weights @ self.node_states)
         for t in range(warmup_time):
-            self.prediction_error = np.sum(self.prediction_history[-1]-training_data[:, t], axis=0)**2
-            self.advance_nodes(training_data[:, t])
-            if t < freezing_time:
-                self.advance_links()
-            else:
-                self.advance_links(freezing=True)
-            self.prediction_history.append(self.output_weights @ self.node_states)
-            
+            self.predict_single_sample(np.copy(training_data[:, t]), freeze=t>freezing_time, channels_using_sample=range(training_data.shape[0]))
 
+        for t in range(warmup_time, training_data.shape[-1]):
+            self.predict_single_sample(np.copy(training_data[:, t]), freeze=t>freezing_time, channels_using_sample=channels_using_sample)
+        
+        return np.asarray(self.prediction_history).T
+
+    def predict_single_sample(self, sample, freeze=False, save_link_history=True, channels_using_sample=None):
+        self.prediction_error = np.sum(self.prediction_history[-1]-sample, axis=0)**2
+
+        if channels_using_sample:
+            for i in range(sample.shape[0]):
+                if i not in channels_using_sample:
+                    sample[i] = self.prediction_history[-1][i]
+        else:
+            sample = self.prediction_history[-1]
+        
+        self.advance_nodes(sample)
+        self.advance_links(freezing=freeze, save_history=save_link_history)
+        self.prediction_history.append(self.output_weights @ self.node_states)
+        
+        return self.prediction_history[-1], self.prediction_error
+
+    # def measure_coupling(self, training_data, percentile=95, warmup_time=np.inf):
+    #     # Feeds in the data's warmup samples to estimate max((Q^T n*) / incidence_norm).
+    #     # (max((Q^T n*) / incidence_norm) * epsilon2) + epsilon1 > omega0 for convergence to 1 (section 4.2.1)
+        
+    #     self.node_states, self.link_states = self.gen_initial_states()
+
+    #     for t in range(min(warmup_time, training_data.shape[1])):
+    #         self.advance_nodes(training_data[:, t], save_history=False)
+    #         self.advance_links(save_history=False)
+
+    #     n_star = (self.node_states + 1) / 2
+    #     QTn = (self.incidence_T @ n_star) / self.incidence_norm
+    #     return np.percentile(QTn, percentile)
+
+    # def estimate_best_epsilons(self, coupling_one, coupling_two, min_e1=-1.0, max_e1=1.0, max_e2=3.0, tol=1e-6):
+    #     # Performs a binary search to find the best e1 and e2 values
+        
+    #     e2 = lambda y: (2 * y)/(coupling_one - coupling_two)
+    #     e1 = lambda y: self.omega0 - y - (e2(y) * coupling_two)
+    #     good_solution = lambda y: e2(y) < max_e2 and min_e1 < e1(y) < max_e1
+
+    #     low, high = 0, (max_e2 * (coupling_one - coupling_two))/2
+    #     while high - low > tol:
+    #         y = 0.5 * (high + low)
+    #         if good_solution(y):
+    #             low = y
+    #         else:
+    #             high = y
+
+    #     self.epsilon1 = e1(y)
+    #     self.epsilon2 = e2(y)
+    #     return self.epsilon1, self.epsilon2
+
+    # def online_predict_and_train(self, training_data, train_warmup_time=0, train_every=20, pretrain_with=100, prev_trainsteps_to_remember=5, reset=True):
+    #         # Checks and setup
+    #         assert train_warmup_time < pretrain_with and train_warmup_time < train_every * prev_trainsteps_to_remember, "Warmup time for training exceeds training data passed"
+    #         assert pretrain_with < training_data.shape[1], "Pretraining is longer than actual data"
+    #         assert pretrain_with >= train_every * prev_trainsteps_to_remember, "Not enough pretrain data for initial retrain step"
+    #         w_out_hist, errs = [], []
+    #         if reset:
+    #            self.prediction_history = [] 
+            
+    #         # Perform pretraining
+    #         w_out_hist.append(self.train(training_data[:, :pretrain_with], warmup_time=train_warmup_time))
+            
+    #         # Prediction loop
+    #         self.node_states, self.link_states = self.gen_initial_states()
+    #         self.prediction_history.append(self.output_weights @ self.node_states)
+    #         for t in range(pretrain_with, training_data.shape[1]):
+    #             # Calculate prediction
+    #             errs.append(self.predict_single_sample(training_data[:, t])[1])
+                
+    #             # Periodically retrain
+    #             if t % train_every == 0 and t > pretrain_with:
+    #                 w_out_hist.append(self.train(training_data[:, t-(prev_trainsteps_to_remember*train_every):t], warmup_time=train_warmup_time, save_link_history=False))
+            
+    #         return np.asarray(self.prediction_history).T, np.asarray(w_out_hist), self.get_global_parameters()[0], np.asarray(errs)
