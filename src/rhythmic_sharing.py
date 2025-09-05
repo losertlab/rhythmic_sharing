@@ -163,16 +163,16 @@ class RhythmicNetwork:
     def train(self, training_data, warmup_time=0, reg_type='auto'):
         for t in range(warmup_time):
             self.advance(training_data[:, t], save_history=False)
-        self.node_states_history.append(np.copy(self.node_states))
-        for t in range(warmup_time, training_data.shape[1]-1):
+        for t in range(warmup_time, training_data.shape[1]):
             self.advance(training_data[:, t])
-        self.training_data_history.append(np.copy(training_data[:, training_data.shape[1]-1]))
         self.compute_weights(reg_type=reg_type)
 
     def compute_weights(self, reg_type='auto'):
+        reg_node_states = np.asarray(self.node_states_history)[:-1]
+        training_data = np.asarray(self.training_data_history)[1:]
         if reg_type != 'manual':
             ridge_model = Ridge(alpha=self.regularization, fit_intercept=False)
-            ridge_model.fit(np.asarray(self.node_states_history), np.asarray(self.training_data_history))
+            ridge_model.fit(reg_node_states, training_data)
             self.output_weights = ridge_model.coef_
         else:
             identity1 = self.regularization*sparse.identity(self.num_nodes)
@@ -198,11 +198,11 @@ class RhythmicNetwork:
         return global_synchrony, global_mean_phase
 
     def get_output(self):
-        return np.copy(self.output_weights @ self.node_states)
+        return self.output_weights @ self.node_states
 
     def predict(self, test_data, warmup_time=0, freezing_time=float('inf'), prediction_time=0):
         self.node_states, self.link_states = self.gen_initial_states(seed_offset=2)
-        self.prediction_history.append(np.copy(self.output_weights @ self.node_states))
+        self.prediction_history.append(self.output_weights @ self.node_states)
         self.node_states_history, self.link_states_history = [], []
         self.node_states_history.append(np.copy(self.node_states))
         self.link_states_history.append(np.copy(self.link_states))
