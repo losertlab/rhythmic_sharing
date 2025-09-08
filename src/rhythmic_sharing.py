@@ -49,8 +49,9 @@ class RhythmicNetwork:
         self.num_links = np.count_nonzero(self.node_adj_matrix.toarray())
         self.link_adj_matrix, self.link_adj_norm = self.gen_link_adj_matrix()
         self.natural_frequencies = self.gen_natural_frequencies()
-        self.node_states, self.link_states = self.gen_initial_states()
-        self.node_states_history, self.link_states_history, self.training_data_history, self.prediction_history = [], [], [], []
+
+        self.reset_initial_states()
+        self.reset_history()
 
     def gen_node_adj_matrix(self):
         unbounded_links = sparse.random(self.num_nodes, self.num_nodes, density=self.average_degree_nodes/self.num_nodes, random_state=self.model_seed)
@@ -119,13 +120,17 @@ class RhythmicNetwork:
             natural_frequencies[np.where(natural_frequencies!=0)[0]] = np.random.normal(loc=self.omega0_mean, scale=self.omega0_spread, size=np.where(natural_frequencies!=0)[0].shape[0])
         return natural_frequencies
 
-    def gen_initial_states(self, seed_offset=0):
+    def reset_initial_states(self, seed_offset=0):
         node_states = np.zeros((self.num_nodes))
         link_states = np.zeros((self.num_links))
         for i in range(self.num_links):
             np.random.seed(i+seed_offset)
             link_states[i] = np.random.rand(1)[0]*2*np.pi
-        return node_states, link_states
+        self.node_states, self.link_states = node_states, link_states
+
+    def reset_history(self):
+        self.node_states_history, self.link_states_history, self.training_data_history, self.prediction_history = [], [], [], []
+        self.prediction_history.append(self.output_weights @ self.node_states)
 
     def advance_nodes(self, input_state, save_history=True):
         link_phases = np.zeros((self.num_nodes**2))
@@ -148,10 +153,9 @@ class RhythmicNetwork:
         if not freezing:
             forcing = (self.epsilon1 + self.epsilon2*((self.incidence_T @ (self.node_states+1)/2)) * (1/self.incidence_norm)) * np.sin(local_mean_phase-self.link_states+self.bias_phase)
             self.link_states = self.link_states + self.dt*(self.natural_frequencies + forcing)
-        else:
-            self.frozen = self.frozen or (np.abs(global_mean_phase-self.mean_phase_threshold) < self.mean_phase_tolerance and self.prediction_error < self.error_tolerance)
-            if not self.frozen:
-                self.link_states = self.link_states + self.dt*self.omega0
+        elif not self.frozen:
+            self.link_states = self.link_states + self.dt*self.omega0
+            self.frozen = np.abs(global_mean_phase-self.mean_phase_threshold) < self.mean_phase_tolerance and self.prediction_error < self.error_tolerance
         
         if save_history:
             self.link_states_history.append(np.copy(self.link_states))
@@ -188,6 +192,9 @@ class RhythmicNetwork:
             wout= np.matmul(thingy1,thingy2) 
             self.output_weights = wout
 
+    def compute_predict_error(self, state):
+        self.prediction_error = np.sum(self.prediction_history[-1]-state, axis=0)**2
+
     def get_history(self):
         return np.asarray(self.node_states_history).T, np.asarray(self.link_states_history).T, np.asarray(self.training_data_history).T, np.asarray(self.prediction_history).T
 
@@ -203,13 +210,10 @@ class RhythmicNetwork:
         return output
 
     def predict(self, test_data, warmup_time=0, freezing_time=float('inf'), prediction_time=0):
-        self.node_states, self.link_states = self.gen_initial_states(seed_offset=2)
-        self.prediction_history.append(self.output_weights @ self.node_states)
-        self.node_states_history, self.link_states_history = [], []
-        self.node_states_history.append(np.copy(self.node_states))
-        self.link_states_history.append(np.copy(self.link_states))
+        self.reset_initial_states(seed_offset=2)
+        self.reset_history()
         for t in range(warmup_time):
-            self.prediction_error = np.sum(self.prediction_history[-1]-test_data[:, t], axis=0)**2
+            self.compute_predict_error(test_data[:, t])
             self.advance(test_data[:, t], freezing=(t >= freezing_time))
             self.get_output()
         for t in range(warmup_time, warmup_time+prediction_time):
