@@ -198,7 +198,9 @@ class RhythmicNetwork:
         return global_synchrony, global_mean_phase
 
     def get_output(self):
-        return self.output_weights @ self.node_states
+        output = self.output_weights @ self.node_states
+        self.prediction_history.append(output)
+        return output
 
     def predict(self, test_data, warmup_time=0, freezing_time=float('inf'), prediction_time=0):
         self.node_states, self.link_states = self.gen_initial_states(seed_offset=2)
@@ -209,10 +211,10 @@ class RhythmicNetwork:
         for t in range(warmup_time):
             self.prediction_error = np.sum(self.prediction_history[-1]-test_data[:, t], axis=0)**2
             self.advance(test_data[:, t], freezing=(t >= freezing_time))
-            self.prediction_history.append(self.get_output())
+            self.get_output()
         for t in range(warmup_time, warmup_time+prediction_time):
             self.advance(self.prediction_history[-1], freezing=True)
-            self.prediction_history.append(self.get_output())
+            self.get_output()
 
             
 
