@@ -7,21 +7,16 @@ Yet the living neural networks of brains can rapidly infer contextual changes in
 
 This model utilizes dynamical systems theory and algebraic topology (homotopy) theory. Specifically, the model may be thought of as involving dynamic interactions between a network of 0-simplices (nodes) and a network of 1-simplices (links), each evolving as a unique dynamical system. By simply needing to specify the mean phase variables $(R, \langle \Phi\rangle)$ to steer the network into a desired basin of attraction, the dimension required to specify the control object is effectively reduced from $\mathbb{R}^{N_n}$ to $\mathbb{R}^2$.
 
-## What is included in this repository
-
-- **thomas.csv** : 	CSV file of nonstationary data of Thomas system. This file is used in the example Python notebook that runs the algorithm (see below).
-- **thomas_periodic_orbit.csv** : CSV file of the periodic orbit of the Thomas system, corresponding to b = 0.29 (see sect.4.1.1 in the manuscript).
-- **rhythmic_sharing_example.ipynb** : Jupyter notebook of the algorithm using nonstationary data from the Thomas system, as used in the manuscript. Prediction of stationary states is not shown in the notebook, as that is up to the user to define which $\langle \Phi\rangle$ to freeze. Instead, an output trajectory showing the network continuously hopping through various individual attractors as $\langle \Phi\rangle$ evolves linearly is shown in the notebook output.
-- **thomas_data_generate.nb** : Mathematica notebook used to generate data of Thomas system.
+## In This Branch
+In addition to the files from the main branch, the files used to generate all of the plots from our submission to npj are available in src/\*.ipynb.  The files are not seeded so they may yield slightly different plots each run.  The data files must be downloaded separately and added to the src/ folder
   
 
-
 ## Compatibility
-Python 3.9.13
+Python 3.9-3.12 (at least) - look at requirements.txt
 
-Mathematica 13.2.0.0 (only used for sample data generation; not necessary to run the algorithm)
+Mathematica 13.2.0.0 (only used for sample data generation; not necessary to run the algorithm) - not needed for npj files
 
-No GPU is needed. For the Thomas system, runtime is on the order of seconds if executing the code locally on your laptop.
+No GPU is needed. For the Thomas system, runtime is on the order of seconds if executing the code locally on your laptop. - not needed for npj files
 
 ## Intellectual property notice
 The code available on this page is based on the algorithm filed under U.S. Provisional Application No. 63/716,102.
