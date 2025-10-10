@@ -164,33 +164,19 @@ class RhythmicNetwork:
         self.advance_nodes(input_state, save_history=save_history)
         self.advance_links(save_history=save_history, freezing=freezing)
 
-    def train(self, training_data, warmup_time=0, reg_type='auto'):
+    def train(self, training_data, warmup_time=0):
         for t in range(warmup_time):
             self.advance(training_data[:, t], save_history=False)
         for t in range(warmup_time, training_data.shape[1]):
             self.advance(training_data[:, t])
-        self.compute_weights(reg_type=reg_type)
+        self.compute_weights()
 
-    def compute_weights(self, reg_type='auto'):
+    def compute_weights(self):
         reg_node_states = np.asarray(self.node_states_history)[:-1]
         training_data = np.asarray(self.training_data_history)[1:]
-        if reg_type != 'manual':
-            ridge_model = Ridge(alpha=self.regularization, fit_intercept=False)
-            ridge_model.fit(reg_node_states, training_data)
-            self.output_weights = ridge_model.coef_
-        else:
-            identity1 = self.regularization*sparse.identity(self.num_nodes)
-            training_data = np.asarray(self.training_data_history).T
-            node_history = np.asarray(self.node_states_history).T
-            identity2 = np.identity(training_data.shape[1])
-            wout=np.zeros((training_data.shape[0],self.num_nodes))
-
-            thingy1= np.matmul(np.matmul(training_data,identity2),np.transpose(node_history))
-            # Y_target * X^T
-
-            thingy2= pinv(np.matmul(np.matmul(node_history,identity2),np.transpose(node_history))+ identity1)
-            wout= np.matmul(thingy1,thingy2) 
-            self.output_weights = wout
+        ridge_model = Ridge(alpha=self.regularization, fit_intercept=False)
+        ridge_model.fit(reg_node_states, training_data)
+        self.output_weights = ridge_model.coef_
 
     def compute_predict_error(self, state):
         self.prediction_error = np.sum(self.prediction_history[-1]-state, axis=0)**2
@@ -201,24 +187,47 @@ class RhythmicNetwork:
     def get_global_parameters(self):
         R_x = np.average(np.cos(np.asarray(self.link_states_history).T), axis=0)
         R_y = np.average(np.sin(np.asarray(self.link_states_history).T), axis=0)
-        global_synchrony, global_mean_phase = (R_x**2 + R_y**2)**(1/2), np.arctan(R_y, R_x)
+        global_synchrony, global_mean_phase = (R_x**2 + R_y**2)**(1/2), np.arctan2(R_y, R_x)
         return global_synchrony, global_mean_phase
+
+    def get_input_parameters(self):
+        inp_rs = []
+        inp_ph = []
+        for inp in range(self.input_weights.shape[1]):
+            links_from_input = []
+            inp_nodes = self.input_weights[:, inp].nonzero()[0]
+            for i in inp_nodes:
+                _, connected_nodes = self.node_adj_matrix[i, :].nonzero()
+                for j in connected_nodes:
+                    flat_idx = i * self.num_nodes + j
+                    links_from_input.append(np.where(flat_idx == self.nonzero_adj_idxs)[0][0])
+            links_from_input = np.asarray(links_from_input).astype(int)
+            R_x = np.average(np.cos(np.asarray(self.link_states_history).T[links_from_input]), axis=0)
+            R_y = np.average(np.sin(np.asarray(self.link_states_history).T[links_from_input]), axis=0)
+            inp_rs.append((R_x**2 + R_y**2)**(1/2))
+            inp_ph.append(np.arctan2(R_y, R_x))
+        return np.asarray(inp_rs), np.asarray(inp_ph)
 
     def get_output(self):
         output = self.output_weights @ self.node_states
         self.prediction_history.append(output)
         return output
 
-    def predict(self, test_data, warmup_time=0, freezing_time=float('inf'), prediction_time=0):
+    def predict(self, test_data, warmup_time=0, freezing_time=float('inf')):
+        prediction_time = test_data.shape[1] - warmup_time
+        
         self.reset_initial_states(seed_offset=2)
         self.reset_history()
+        
         for t in range(warmup_time):
             self.compute_predict_error(test_data[:, t])
             self.advance(test_data[:, t], freezing=(t >= freezing_time))
             self.get_output()
+            
         for t in range(warmup_time, warmup_time+prediction_time):
             self.advance(self.prediction_history[-1], freezing=True)
             self.get_output()
 
+        return np.asarray(self.prediction_history[warmup_time-1:-1]).T
             
 
