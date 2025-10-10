@@ -11,7 +11,7 @@ class RhythmicNetwork:
         self.dt = kwargs.get('dt', 1)
         self.average_degree_nodes = kwargs.get('average_degree_nodes', 10)
         self.num_nodes = kwargs.get('num_nodes', 100)
-        self.link_dist = kwargs.get('link_dist', 'discrete')
+        self.link_dist = kwargs.get('link_dist', 'normal')
         self.omega0 = kwargs.get('omega0', 0.01)
         self.omega0_mean = kwargs.get('omega0_mean', self.omega0)
         self.omega0_spread = kwargs.get('omega0_spread', self.omega0/3)
@@ -120,6 +120,14 @@ class RhythmicNetwork:
             natural_frequencies[np.where(natural_frequencies!=0)[0]] = np.random.normal(loc=self.omega0_mean, scale=self.omega0_spread, size=np.where(natural_frequencies!=0)[0].shape[0])
         return natural_frequencies
 
+    def delete_history_and_update_natural_frequencies(self, new_freqs):
+        self.reset_initial_states(seed_offset=3)
+        self.reset_history()
+        self.natural_frequencies[np.where(self.natural_frequencies!=0)[0]] = new_freqs
+
+    def get_natural_frequencies(self):
+        return self.natural_frequencies[np.where(self.natural_frequencies!=0)[0]]
+
     def reset_initial_states(self, seed_offset=0):
         node_states = np.zeros((self.num_nodes))
         link_states = np.zeros((self.num_links))
@@ -169,7 +177,7 @@ class RhythmicNetwork:
             self.advance(training_data[:, t], save_history=False)
         for t in range(warmup_time, training_data.shape[1]):
             self.advance(training_data[:, t])
-        self.compute_weights(reg_type=reg_type)
+        # self.compute_weights(reg_type=reg_type) # I COMMENTED THIS OUT JUST FOR THIS BRANCH, DO NOT COMMIT TO MAIN
 
     def compute_weights(self, reg_type='auto'):
         reg_node_states = np.asarray(self.node_states_history)[:-1]
@@ -209,16 +217,22 @@ class RhythmicNetwork:
         self.prediction_history.append(output)
         return output
 
-    def predict(self, test_data, warmup_time=0, freezing_time=float('inf'), prediction_time=0):
+    def predict(self, test_data, warmup_time=0, freezing_time=float('inf')):
+        prediction_time = test_data.shape[1] - warmup_time
+        
         self.reset_initial_states(seed_offset=2)
         self.reset_history()
+        
         for t in range(warmup_time):
             self.compute_predict_error(test_data[:, t])
             self.advance(test_data[:, t], freezing=(t >= freezing_time))
             self.get_output()
+            
         for t in range(warmup_time, warmup_time+prediction_time):
             self.advance(self.prediction_history[-1], freezing=True)
             self.get_output()
+
+        return np.asarray(self.prediction_history[warmup_time-1:-1]).T
 
             
 
