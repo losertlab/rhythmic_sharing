@@ -5,7 +5,9 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "matplotlib>=3.10.6",
     "networkx>=3.5",
+    "pandas>=2.3.2",
     "scikit-learn>=1.7.1",
     "stonesoup>=1.7",
 ]

@@ -132,11 +132,13 @@ class RhythmicNetwork:
         self.node_states_history, self.link_states_history, self.training_data_history, self.prediction_history = [], [], [], []
         self.prediction_history.append(self.output_weights @ self.node_states)
 
-    def advance_nodes(self, input_state, save_history=True):
+    def advance_nodes(self, input_state, save_history=True, static=False):
         link_phases = np.zeros((self.num_nodes**2))
         link_phases[self.nonzero_adj_idxs] = self.link_states
         link_phases = np.reshape(link_phases, (self.num_nodes, self.num_nodes))
         modulated_node_adj_matrix = self.node_adj_matrix.toarray()*(1-(self.link_strength_change_ratio/2)*(1+np.sin(link_phases)))
+        if static:
+            self.old_node_states = np.copy(self.node_states)
         self.node_states = self.leakage*self.node_states + (1-self.leakage)*np.tanh(modulated_node_adj_matrix.dot(self.node_states) + self.input_weights @ input_state + self.bias_nodes)
         if save_history:
             self.node_states_history.append(np.copy(self.node_states))
@@ -163,6 +165,9 @@ class RhythmicNetwork:
     def advance(self, input_state, save_history=True, freezing=False):
         self.advance_nodes(input_state, save_history=save_history)
         self.advance_links(save_history=save_history, freezing=freezing)
+
+    def advance_static(self, input_state):
+        self.advance_nodes(input_state, save_history=False, static=True)
 
     def train(self, training_data, warmup_time=0, reg_type='auto'):
         for t in range(warmup_time):
@@ -204,20 +209,23 @@ class RhythmicNetwork:
         global_synchrony, global_mean_phase = (R_x**2 + R_y**2)**(1/2), np.arctan(R_y, R_x)
         return global_synchrony, global_mean_phase
 
-    def get_output(self):
+    def get_output(self, static=False):
         output = self.output_weights @ self.node_states
-        self.prediction_history.append(output)
+        if static:
+            self.node_states = self.old_node_states
+        else:
+            self.prediction_history.append(output)
         return output
 
-    def predict(self, test_data, warmup_time=0, freezing_time=float('inf'), prediction_time=0):
+    def predict(self, test_data, warmup_time=0, freezing_time=float('inf'), prediction_time=0, freezing=True):
         self.reset_initial_states(seed_offset=2)
         self.reset_history()
         for t in range(warmup_time):
             self.compute_predict_error(test_data[:, t])
-            self.advance(test_data[:, t], freezing=(t >= freezing_time))
+            self.advance(test_data[:, t], freezing=(freezing and (t >= freezing_time)))
             self.get_output()
         for t in range(warmup_time, warmup_time+prediction_time):
-            self.advance(self.prediction_history[-1], freezing=True)
+            self.advance(self.prediction_history[-1], freezing=freezing)
             self.get_output()
 
             
