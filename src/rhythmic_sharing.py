@@ -5,6 +5,8 @@ from scipy.sparse import linalg
 from scipy.linalg import pinv
 import networkx as nx
 from sklearn.linear_model import Ridge
+import warnings
+from tqdm import tqdm
 
 class RhythmicNetwork:
     def __init__(self, **kwargs):
@@ -29,6 +31,7 @@ class RhythmicNetwork:
         self.model_seed = kwargs.get('model_seed', 0)
         self.input_dims = kwargs.get('input_dims', 3)
         self.frozen = False
+        self.lsqrs = False
         self.mean_phase_threshold = kwargs.get('mean_phase_threshold', np.pi)
         self.mean_phase_tolerance = kwargs.get('mean_phase_tolerance', 1e-3)
         self.error_threshold = kwargs.get('error_threshold', 1e-3)
@@ -53,6 +56,14 @@ class RhythmicNetwork:
         self.reset_initial_states()
         self.reset_history()
 
+    def change_spectral_rad_and_leakage(self, spectral_radius, leakage):
+        self.leakage = leakage
+        self.spectral_radius = spectral_radius
+        self.node_adj_matrix = self.gen_node_adj_matrix()
+
+        self.reset_initial_states()
+        self.reset_history()
+    
     def gen_node_adj_matrix(self):
         unbounded_links = sparse.random(self.num_nodes, self.num_nodes, density=self.average_degree_nodes/self.num_nodes, random_state=self.model_seed)
         bounded_links = 2*unbounded_links - unbounded_links.ceil()
@@ -167,15 +178,36 @@ class RhythmicNetwork:
     def train(self, training_data, warmup_time=0):
         for t in range(warmup_time):
             self.advance(training_data[:, t], save_history=False)
-        for t in range(warmup_time, training_data.shape[1]):
-            self.advance(training_data[:, t])
+        
+        t_range = range(warmup_time, training_data.shape[1])
+        if len(t_range) > 10_000:
+            for t in tqdm(t_range):
+                self.advance(training_data[:, t])
+        else:
+            for t in t_range:
+                self.advance(training_data[:, t])
         self.compute_weights()
+
+    def create_model(self):
+        if not self.lsqrs:
+            ridge_model = Ridge(alpha=self.regularization, fit_intercept=False, solver="auto")
+        else:
+            ridge_model = Ridge(alpha=self.regularization, fit_intercept=False, solver="lsqr")
+        return ridge_model
 
     def compute_weights(self):
         reg_node_states = np.asarray(self.node_states_history)[:-1]
         training_data = np.asarray(self.training_data_history)[1:]
-        ridge_model = Ridge(alpha=self.regularization, fit_intercept=False)
-        ridge_model.fit(reg_node_states, training_data)
+        ridge_model = self.create_model()
+        
+        with warnings.catch_warnings(record=True) as warning_list:
+            warnings.simplefilter("always")
+            ridge_model.fit(reg_node_states, training_data)
+            if warning_list:
+                print("Switching to lsqr")
+                self.lsqrs = not self.lsqrs
+                ridge_model = self.create_model()
+                ridge_model.fit(reg_node_states, training_data)
         self.output_weights = ridge_model.coef_
 
     def compute_predict_error(self, state):
