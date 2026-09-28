@@ -261,5 +261,48 @@ class RhythmicNetwork:
             self.get_output()
 
         return np.asarray(self.prediction_history[warmup_time-1:-1]).T
+
+
+    def predict(self, test_data, warmup_time=0, freezing_time=float('inf')):
+        prediction_time = test_data.shape[1] - warmup_time
+        
+        self.reset_initial_states(seed_offset=2)
+        self.reset_history()
+        
+        for t in range(warmup_time):
+            self.compute_predict_error(test_data[:, t])
+            self.advance(test_data[:, t], freezing=(t >= freezing_time))
+            self.get_output()
+            
+        for t in range(warmup_time, warmup_time+prediction_time):
+            self.advance(self.prediction_history[-1], freezing=True)
+            self.get_output()
+
+        return np.asarray(self.prediction_history[warmup_time-1:-1]).T
+
+    def predict_set_r(self, test_data, r_setpoint, warmup_time=0):
+        from simple_pid import PID
+        
+        prediction_time = test_data.shape[1] - warmup_time
+        frozen = False
+        pid = PID(1, 0.1, 0.05, setpoint=r_setpoint, starting_output=self.epsilon1)
+        
+        self.reset_initial_states(seed_offset=2)
+        self.reset_history()
+        
+        for t in range(warmup_time):
+            self.compute_predict_error(test_data[:, t])
+            self.advance(test_data[:, t], freezing=frozen)
+            self.get_output()
+
+            if not frozen:
+                r = self.get_global_parameters()[0][-1]
+                self.epsilon1 = pid(r)
+            
+        for t in range(warmup_time, warmup_time+prediction_time):
+            self.advance(self.prediction_history[-1], freezing=True)
+            self.get_output()
+
+        return np.asarray(self.prediction_history[warmup_time-1:-1]).T
             
 
