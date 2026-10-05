@@ -8,26 +8,21 @@ from sklearn.linear_model import Ridge
 import warnings
 from tqdm import tqdm
 
-class RhythmicNetwork:
+from lm_neuron_eq import initial_states, clip_voltage, single_unit
+
+
+class SpikingNetwork:
     def __init__(self, **kwargs):
         self.dt = kwargs.get('dt', 1)
         self.average_degree_nodes = kwargs.get('average_degree_nodes', 10)
         self.num_nodes = kwargs.get('num_nodes', 100)
-        self.link_dist = kwargs.get('link_dist', 'discrete')
-        self.omega0 = kwargs.get('omega0', 0.01)
-        self.omega0_mean = kwargs.get('omega0_mean', self.omega0)
-        self.omega0_spread = kwargs.get('omega0_spread', self.omega0/3)
         self.input_weight = kwargs.get('input_weight', 120e-2)
         self.input_weight_assign_to = kwargs.get('input_weight_assign_to', None)
-        self.epsilon1 = kwargs.get('epsilon1', -0.2)
-        self.epsilon2 = kwargs.get('epsilon2', 0.6)
         self.leakage = kwargs.get('leakage', 0.0)
         self.spectral_radius = kwargs.get('spectral_radius', 0.6)
         self.bias_nodes = kwargs.get('bias_nodes', 0)
-        self.rhythmic_link_ratio = kwargs.get('rhythmic_link_ratio', 1)
         self.link_strength_change_ratio = kwargs.get('link_strength_change_ratio', 0.6)
         self.regularization = kwargs.get('regularization', 1e-20)
-        self.bias_phase = kwargs.get('bias_phase', 0)
         self.model_seed = kwargs.get('model_seed', 0)
         self.input_dims = kwargs.get('input_dims', 3)
         self.frozen = False
@@ -36,6 +31,13 @@ class RhythmicNetwork:
         self.mean_phase_tolerance = kwargs.get('mean_phase_tolerance', 1e-3)
         self.error_threshold = kwargs.get('error_threshold', 1e-3)
         self.error_tolerance = kwargs.get('error_tolerance', 1e-3)
+
+        # Spiking config
+        self.omega0 = kwargs.get('omega0', 0.01)
+        self.I_bias = kwargs.get('I_bias', 39.96 - 1.0) # 39.96 is I_c
+        self.link_dist = kwargs.get('link_dist', 'discrete')
+        self.g_drive = kwargs.get('g_drive', 12.0)
+        self.link_coupling = kwargs.get('link_coupling', 1.0)
 
         if not np.isscalar(self.input_weight) and not self.input_weight_assign_to:
             assert False, "Must pass in 'input_weight_assign_to' if 'input_weight' is a list"
@@ -50,7 +52,6 @@ class RhythmicNetwork:
         self.output_weights = np.zeros((self.input_dims, self.num_nodes))
         self.num_links = np.count_nonzero(self.node_adj_matrix.toarray())
         self.link_adj_matrix, self.link_adj_norm = self.gen_link_adj_matrix()
-        self.natural_frequencies = self.gen_natural_frequencies()
 
         self.reset_initial_states()
         self.reset_history()
@@ -121,54 +122,47 @@ class RhythmicNetwork:
             link_adj_matrix_norm[np.where(link_adj_matrix_norm==0)]=1000
         return link_adj_matrix, link_adj_matrix_norm
 
-    def gen_natural_frequencies(self):
-        if self.link_dist == 'discrete':
-            natural_frequencies = sparse.random(1, self.num_links, density=self.rhythmic_link_ratio, random_state=self.model_seed+5)
-            natural_frequencies = np.matrix.flatten(np.ceil(natural_frequencies.toarray()))*self.omega0
-        elif self.link_dist == 'normal':
-            natural_frequencies = sparse.random(1, self.num_links, density=self.rhythmic_link_ratio, random_state=self.model_seed+5)
-            natural_frequencies = np.matrix.flatten(np.ceil(natural_frequencies.toarray()))
-            natural_frequencies[np.where(natural_frequencies!=0)[0]] = np.random.normal(loc=self.omega0_mean, scale=self.omega0_spread, size=np.where(natural_frequencies!=0)[0].shape[0])
-        return natural_frequencies
-
-    def reset_initial_states(self, seed_offset=0):
-        node_states = np.zeros((self.num_nodes))
-        link_states = np.zeros((self.num_links))
-        for i in range(self.num_links):
-            np.random.seed(i+seed_offset)
-            link_states[i] = np.random.rand(1)[0]*2*np.pi
-        self.node_states, self.link_states = node_states, link_states
+    def reset_initial_states(self):
+        self.node_states, self.link_states = np.zeros((self.num_nodes,)), initial_states(self.num_links)
+        self.reset_link_bookkeeping()
 
     def reset_history(self):
-        self.node_states_history, self.link_states_history, self.training_data_history, self.prediction_history = [], [], [], []
+        self.node_states_history, self.link_states_history, self.link_phase_history, self.training_data_history, self.prediction_history = [], [], [], [], []
         self.prediction_history.append(self.output_weights @ self.node_states)
 
     def advance_nodes(self, input_state, save_history=True):
-        modulated_node_adj_matrix = self.node_adj_matrix.copy()
-        modulated_node_adj_matrix.data *= (1-(self.link_strength_change_ratio/2)*(1+np.sin(self.link_states)))
+        copied_node_adj_matrix = self.node_adj_matrix.copy()
+        copied_node_adj_matrix.data *= (1 - self.link_strength_change_ratio * clip_voltage(self.link_states[:, 0]))
 
-        self.node_states = self.leakage*self.node_states + (1-self.leakage)*np.tanh(modulated_node_adj_matrix.dot(self.node_states) + self.input_weights @ input_state + self.bias_nodes)
+        self.node_states = self.leakage*self.node_states + (1-self.leakage)*np.tanh(copied_node_adj_matrix.dot(self.node_states) + self.input_weights @ input_state + self.bias_nodes)
         if save_history:
             self.node_states_history.append(np.copy(self.node_states))
             self.training_data_history.append(np.copy(input_state))
 
     def advance_links(self, save_history=True, freezing=False):
-        r_x_local = self.link_adj_matrix.dot(np.cos(self.link_states)) * (1/self.link_adj_norm)
-        r_x_global = np.average(np.cos(self.link_states), axis=0)
-        r_y_local = self.link_adj_matrix.dot(np.sin(self.link_states)) * (1/self.link_adj_norm)
-        r_y_global = np.average(np.sin(self.link_states), axis=0)
-        global_mean_phase = np.arctan2(r_y_global, r_x_global)
-        local_mean_phase = np.arctan2(r_y_local, r_x_local)
+        if freezing and self.frozen:
+            if save_history:
+                self.link_states_history.append(np.copy(self.link_states))
+                self.link_phase_history.append(self.spike_phase())
+            return
 
         if not freezing:
-            forcing = (self.epsilon1 + self.epsilon2*((self.incidence_T @ (self.node_states+1)/2)) * (1/self.incidence_norm)) * np.sin(local_mean_phase-self.link_states+self.bias_phase)
-            self.link_states = self.link_states + self.dt*(self.natural_frequencies + forcing)
-        elif not self.frozen:
-            self.link_states = self.link_states + self.dt*self.omega0
-            self.frozen = np.abs(global_mean_phase-self.mean_phase_threshold) < self.mean_phase_tolerance and self.prediction_error < self.error_tolerance
-        
+            I_drive = self.g_drive * (self.incidence_T @ ((self.node_states + 1)/2)) * (1/self.incidence_norm)
+            I_ext = self.I_bias + I_drive
+            self.integrate_and_update(I_ext, True)
+        else:
+            I_ext = self.I_bias * np.ones(self.num_links)
+            self.integrate_and_update(I_ext, False)
+
+        phase = self.spike_phase()
+        if freezing:
+            z = np.nanmean(np.exp(1j * phase)) if np.any(~np.isnan(phase)) else np.nan
+            phase_gap = np.angle(z * np.exp(-1j * self.mean_phase_threshold))
+            self.frozen = bool(np.abs(phase_gap) < self.mean_phase_tolerance and self.prediction_error < self.error_tolerance)
+
         if save_history:
             self.link_states_history.append(np.copy(self.link_states))
+            self.link_phase_history.append(phase)
 
     def advance(self, input_state, save_history=True, freezing=False):
         self.advance_nodes(input_state, save_history=save_history)
@@ -216,28 +210,30 @@ class RhythmicNetwork:
         return np.asarray(self.node_states_history).T, np.asarray(self.link_states_history).T, np.asarray(self.training_data_history).T, np.asarray(self.prediction_history).T
 
     def get_global_parameters(self):
-        R_x = np.average(np.cos(np.asarray(self.link_states_history).T), axis=0)
-        R_y = np.average(np.sin(np.asarray(self.link_states_history).T), axis=0)
-        global_synchrony, global_mean_phase = (R_x**2 + R_y**2)**(1/2), np.arctan2(R_y, R_x)
-        return global_synchrony, global_mean_phase
+        z = np.nanmean(np.exp(1j * np.asarray(self.link_phase_history)), axis=1)
+        return np.abs(z), np.angle(z)
 
     def get_input_parameters(self):
-        inp_rs = []
+        inp_mag = []
         inp_ph = []
         for inp in range(self.input_weights.shape[1]):
             links_from_input = []
             inp_nodes = self.input_weights[:, inp].nonzero()[0]
+
             for i in inp_nodes:
                 _, connected_nodes = self.node_adj_matrix[i, :].nonzero()
                 for j in connected_nodes:
                     flat_idx = i * self.num_nodes + j
-                    links_from_input.append(np.where(flat_idx == get_csr_coords(self.node_adj_matrix))[0][0])
+                    nonzero_adj_idxs = np.where(np.ndarray.flatten(self.node_adj_matrix.toarray())!=0)[0]
+                    links_from_input.append(np.where(flat_idx == nonzero_adj_idxs)[0][0])
+
             links_from_input = np.asarray(links_from_input).astype(int)
-            R_x = np.average(np.cos(np.asarray(self.link_states_history).T[links_from_input]), axis=0)
-            R_y = np.average(np.sin(np.asarray(self.link_states_history).T[links_from_input]), axis=0)
-            inp_rs.append((R_x**2 + R_y**2)**(1/2))
-            inp_ph.append(np.arctan2(R_y, R_x))
-        return np.asarray(inp_rs), np.asarray(inp_ph)
+            z = np.nanmean(np.exp(1j * np.asarray(self.link_phase_history)[:, links_from_input]), axis=1)
+            
+            inp_mag.append(np.abs(z))
+            inp_ph.append(np.angle(z))
+
+        return np.asarray(inp_mag), np.asarray(inp_ph)
 
     def get_output(self):
         output = self.output_weights @ self.node_states
@@ -247,7 +243,7 @@ class RhythmicNetwork:
     def predict(self, test_data, warmup_time=0, freezing_time=float('inf')):
         prediction_time = test_data.shape[1] - warmup_time
         
-        self.reset_initial_states(seed_offset=2)
+        self.reset_initial_states()
         self.reset_history()
         
         for t in range(warmup_time):
@@ -261,29 +257,71 @@ class RhythmicNetwork:
 
         return np.asarray(self.prediction_history[warmup_time-1:-1]).T
 
-    def predict_set_r(self, test_data, r_setpoint, warmup_time=0):
-        from simple_pid import PID
-        
-        prediction_time = test_data.shape[1] - warmup_time
-        frozen = False
-        pid = PID(1, 0.1, 0.05, setpoint=r_setpoint, starting_output=self.epsilon1)
-        
-        self.reset_initial_states(seed_offset=2)
-        self.reset_history()
-        
-        for t in range(warmup_time):
-            self.compute_predict_error(test_data[:, t])
-            self.advance(test_data[:, t], freezing=frozen)
-            self.get_output()
+    # Neuron model helper functions
+    def rk4_substep(self, v, n, s, I_ext, h=0.1, tau_syn=2):
+        rhs = lambda v, n, s: single_unit(v, n, I_ext + self.link_coupling * s) + (-s/tau_syn,)
 
-            if not frozen:
-                r = self.get_global_parameters()[0][-1]
-                self.epsilon1 = pid(r)
-            
-        for t in range(warmup_time, warmup_time+prediction_time):
-            self.advance(self.prediction_history[-1], freezing=True)
-            self.get_output()
+        k1 = rhs(v, n, s)
+        k2 = rhs(v + 0.5*h*k1[0], n + 0.5*h*k1[1], s + 0.5*h*k1[2])
+        k3 = rhs(v + 0.5*h*k2[0], n + 0.5*h*k2[1], s + 0.5*h*k2[2])
+        k4 = rhs(v + h*k3[0], n + h*k3[1], s + h*k3[2])
 
-        return np.asarray(self.prediction_history[warmup_time-1:-1]).T
+        v = v + (h/6) * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0])
+        n = n + (h/6) * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1])
+        s = s + (h/6) * (k1[2] + 2 * k2[2] + 2 * k3[2] + k4[2])
             
+        return v, n, s
+
+    def reference_period(self, I_ref, t_trans=1000, t_meas=1500, h=0.1):
+        v, n, s = np.asarray([-60.0]), np.asarray([0.0]), np.asarray([0.0])
+        t, spikes = 0, []
+
+        while t < t_trans + t_meas:
+            v_new, n, s = self.rk4_substep(v, n, s, I_ref, h=h)
+            if v[0] < 0.0 <= v_new[0] and t > t_trans:
+                spikes.append((t + h * (-v[0]))/(v_new[0] - v[0]))
+            v, t = v_new, t + h
+
+        if len(spikes) < 2:
+            raise ValueError("I_ref %.3f does not fire, raise g_drive or I_bias" % I_ref)
+        return np.mean(np.diff(spikes))
+
+    def integrate_and_update(self, I_ext, coupled):
+        h = self.dt_link/self.n_sub
+        v, n, s = self.link_states[:, 0], self.link_states[:, 1], self.link_syn
+
+        for _ in range(self.n_sub):
+            v_new, n, s = self.rk4_substep(v, n, s, I_ext, h=h)
+            fired = (v < 0) & (v_new >= 0)
+
+            if np.any(fired):
+                t_spk = self.link_time + h * (0 - v[fired])/(v_new[fired] - v[fired])
+
+                self.last_isi[fired] = t_spk - self.last_spike[fired]
+                self.last_spike[fired] = t_spk
+
+                if coupled:
+                    s = s + self.link_adj_matrix.dot(fired.astype(float)) * (1/self.link_adj_norm)
+
+            v = v_new
+            self.link_time += h
+
+        self.link_states = np.stack([v, n], axis=1)
+        self.link_syn = s
+
+    def reset_link_bookkeeping(self, h_max=0.1):
+        self.link_syn = np.zeros(self.num_links)
+        self.link_time = 0.0
+        self.last_spike = np.ones(self.num_links) * -np.inf
+        self.last_isi = np.ones(self.num_links) * np.nan
+        self.frozen = False
+
+        self.dt_link = self.reference_period(self.I_bias + self.g_drive * 0.5, h=h_max) * self.omega0 / (2 * np.pi)
+        self.n_sub = int(np.ceil(self.dt_link/h_max))
+
+    def spike_phase(self):
+        return 2 * np.pi * np.mod((self.link_time - self.last_spike)/self.last_isi, 1.0)
+
+    def silent_links(self, silence_factor=2.0):
+        return ~((self.link_time - self.last_spike) < silence_factor * self.last_isi)
 
