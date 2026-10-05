@@ -13,7 +13,6 @@ from lm_neuron_eq import initial_states, clip_voltage, single_unit
 
 class SpikingNetwork:
     def __init__(self, **kwargs):
-        self.dt = kwargs.get('dt', 1)
         self.average_degree_nodes = kwargs.get('average_degree_nodes', 10)
         self.num_nodes = kwargs.get('num_nodes', 100)
         self.input_weight = kwargs.get('input_weight', 120e-2)
@@ -28,14 +27,13 @@ class SpikingNetwork:
         self.frozen = False
         self.lsqrs = False
         self.mean_phase_threshold = kwargs.get('mean_phase_threshold', np.pi)
-        self.mean_phase_tolerance = kwargs.get('mean_phase_tolerance', 1e-3)
+        self.mean_phase_tolerance = kwargs.get('mean_phase_tolerance', 0.005)
         self.error_threshold = kwargs.get('error_threshold', 1e-3)
         self.error_tolerance = kwargs.get('error_tolerance', 1e-3)
 
         # Spiking config
         self.omega0 = kwargs.get('omega0', 0.01)
         self.I_bias = kwargs.get('I_bias', 39.96 - 1.0) # 39.96 is I_c
-        self.link_dist = kwargs.get('link_dist', 'discrete')
         self.g_drive = kwargs.get('g_drive', 12.0)
         self.link_coupling = kwargs.get('link_coupling', 1.0)
 
@@ -56,14 +54,14 @@ class SpikingNetwork:
         self.reset_initial_states()
         self.reset_history()
 
-    # def change_spectral_rad_and_leakage(self, spectral_radius, leakage):
-    #     self.leakage = leakage
-    #     self.spectral_radius = spectral_radius
-    #     self.node_adj_matrix = self.gen_node_adj_matrix()
-    #     self.link_adj_matrix, self.link_adj_norm = self.gen_link_adj_matrix()
+    def change_spectral_rad_and_leakage(self, spectral_radius, leakage):
+        self.leakage = leakage
+        self.spectral_radius = spectral_radius
+        self.node_adj_matrix = self.gen_node_adj_matrix()
+        self.link_adj_matrix, self.link_adj_norm = self.gen_link_adj_matrix()
 
-    #     self.reset_initial_states()
-    #     self.reset_history()
+        self.reset_initial_states()
+        self.reset_history()
     
     def gen_node_adj_matrix(self):
         unbounded_links = sparse.random(self.num_nodes, self.num_nodes, density=self.average_degree_nodes/self.num_nodes, random_state=self.model_seed)
@@ -122,8 +120,8 @@ class SpikingNetwork:
             link_adj_matrix_norm[np.where(link_adj_matrix_norm==0)]=1000
         return link_adj_matrix, link_adj_matrix_norm
 
-    def reset_initial_states(self):
-        self.node_states, self.link_states = np.zeros((self.num_nodes,)), initial_states(self.num_links)
+    def reset_initial_states(self, offset=1):
+        self.node_states, self.link_states = np.zeros((self.num_nodes,)), initial_states(self.num_links, seed=self.model_seed + offset)
         self.reset_link_bookkeeping()
 
     def reset_history(self):
@@ -207,7 +205,7 @@ class SpikingNetwork:
         self.prediction_error = np.sum(self.prediction_history[-1]-state, axis=0)**2
 
     def get_history(self):
-        return np.asarray(self.node_states_history).T, np.asarray(self.link_states_history).T, np.asarray(self.training_data_history).T, np.asarray(self.prediction_history).T
+        return np.asarray(self.node_states_history).T, np.asarray(self.link_states_history).T, np.asarray(self.link_phase_history).T, np.asarray(self.training_data_history).T, np.asarray(self.prediction_history).T
 
     def get_global_parameters(self):
         z = np.nanmean(np.exp(1j * np.asarray(self.link_phase_history)), axis=1)
@@ -258,26 +256,25 @@ class SpikingNetwork:
         return np.asarray(self.prediction_history[warmup_time-1:-1]).T
 
     # Neuron model helper functions
-    def rk4_substep(self, v, n, s, I_ext, h=0.1, tau_syn=2):
-        rhs = lambda v, n, s: single_unit(v, n, I_ext + self.link_coupling * s) + (-s/tau_syn,)
+    def rk4_substep(self, v, n, I_ext, h=0.1, tau_syn=2):
+        rhs = lambda v, n: single_unit(v, n, I_ext)
 
-        k1 = rhs(v, n, s)
-        k2 = rhs(v + 0.5*h*k1[0], n + 0.5*h*k1[1], s + 0.5*h*k1[2])
-        k3 = rhs(v + 0.5*h*k2[0], n + 0.5*h*k2[1], s + 0.5*h*k2[2])
-        k4 = rhs(v + h*k3[0], n + h*k3[1], s + h*k3[2])
+        k1 = rhs(v, n)
+        k2 = rhs(v + 0.5*h*k1[0], n + 0.5*h*k1[1])
+        k3 = rhs(v + 0.5*h*k2[0], n + 0.5*h*k2[1])
+        k4 = rhs(v + h*k3[0], n + h*k3[1])
 
         v = v + (h/6) * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0])
         n = n + (h/6) * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1])
-        s = s + (h/6) * (k1[2] + 2 * k2[2] + 2 * k3[2] + k4[2])
             
-        return v, n, s
+        return v, n
 
     def reference_period(self, I_ref, t_trans=1000, t_meas=1500, h=0.1):
-        v, n, s = np.asarray([-60.0]), np.asarray([0.0]), np.asarray([0.0])
+        v, n = np.asarray([-60.0]), np.asarray([0.0])
         t, spikes = 0, []
 
         while t < t_trans + t_meas:
-            v_new, n, s = self.rk4_substep(v, n, s, I_ref, h=h)
+            v_new, n = self.rk4_substep(v, n, I_ref, h=h)
             if v[0] < 0.0 <= v_new[0] and t > t_trans:
                 spikes.append((t + h * (-v[0]))/(v_new[0] - v[0]))
             v, t = v_new, t + h
@@ -288,10 +285,10 @@ class SpikingNetwork:
 
     def integrate_and_update(self, I_ext, coupled):
         h = self.dt_link/self.n_sub
-        v, n, s = self.link_states[:, 0], self.link_states[:, 1], self.link_syn
+        v, n = self.link_states[:, 0], self.link_states[:, 1]
 
         for _ in range(self.n_sub):
-            v_new, n, s = self.rk4_substep(v, n, s, I_ext, h=h)
+            v_new, n = self.rk4_substep(v, n, I_ext, h=h)
             fired = (v < 0) & (v_new >= 0)
 
             if np.any(fired):
@@ -301,16 +298,15 @@ class SpikingNetwork:
                 self.last_spike[fired] = t_spk
 
                 if coupled:
-                    s = s + self.link_adj_matrix.dot(fired.astype(float)) * (1/self.link_adj_norm)
+                    # s = s + self.link_adj_matrix.dot(fired.astype(float)) * (1/self.link_adj_norm)
+                    v_new += self.link_coupling * self.link_adj_matrix.dot(fired.astype(float)) / self.link_adj_norm
 
             v = v_new
             self.link_time += h
 
         self.link_states = np.stack([v, n], axis=1)
-        self.link_syn = s
 
     def reset_link_bookkeeping(self, h_max=0.1):
-        self.link_syn = np.zeros(self.num_links)
         self.link_time = 0.0
         self.last_spike = np.ones(self.num_links) * -np.inf
         self.last_isi = np.ones(self.num_links) * np.nan

@@ -7,14 +7,15 @@ from tqdm import tqdm
 V_lo, V_hi = -48, 32
 
 def clip_voltage(V):
-	return (np.clip(V, min=V_lo, max=V_hi) - V_lo)/(V_hi - V_lo) # Bound found from Check -1
+	return (np.clip(V, V_lo, V_hi) - V_lo)/(V_hi - V_lo) # Bound found from Check -1
 
 def N_SS(v, V_3=12, V_4=17.4):
 	return 0.5 * (1 + np.tanh((v - V_3)/V_4))
 
-def initial_states(n):
+def initial_states(n, seed=69):
 	states = np.zeros((n, 2))
-	states[:, 0] = np.random.uniform(size=(n,)) * (V_hi - V_lo) + V_lo
+	rng = np.random.default_rng(seed=seed)
+	states[:, 0] = rng.uniform(size=(n,)) * (V_hi - V_lo) + V_lo
 	states[:, 1] = N_SS(states[:, 0])
 	return states
 
