@@ -51,6 +51,10 @@ class SpikingNetwork:
         self.num_links = np.count_nonzero(self.node_adj_matrix.toarray())
         self.link_adj_matrix, self.link_adj_norm = self.gen_link_adj_matrix()
 
+        h_max = 0.1
+        self.dt_link = self.reference_period(self.I_bias + self.g_drive * 0.5, h=h_max) * self.omega0 / (2 * np.pi)
+        self.n_sub = int(np.ceil(self.dt_link/h_max))
+
         self.reset_initial_states()
         self.reset_history()
 
@@ -144,18 +148,23 @@ class SpikingNetwork:
                 self.link_phase_history.append(self.spike_phase())
             return
 
-        if not freezing:
-            I_drive = self.g_drive * (self.incidence_T @ ((self.node_states + 1)/2)) * (1/self.incidence_norm)
-            I_ext = self.I_bias + I_drive
-            self.integrate_and_update(I_ext, True)
-        else:
-            I_ext = self.I_bias * np.ones(self.num_links)
-            self.integrate_and_update(I_ext, False)
+        # if not freezing:
+        #     I_drive = self.g_drive * (self.incidence_T @ ((self.node_states + 1)/2)) * (1/self.incidence_norm)
+        #     I_ext = self.I_bias + I_drive
+        #     self.integrate_and_update(I_ext, True)
+        # else:
+        #     I_ext = (self.I_bias + 0.5 * self.g_drive) * np.ones(self.num_links)
+        #     self.integrate_and_update(I_ext, False)
+
+        I_drive = self.g_drive * (self.incidence_T @ ((self.node_states + 1)/2)) * (1/self.incidence_norm)
+        I_ext = self.I_bias + I_drive
+        self.integrate_and_update(I_ext, not freezing)
 
         phase = self.spike_phase()
         if freezing:
             z = np.nanmean(np.exp(1j * phase)) if np.any(~np.isnan(phase)) else np.nan
             phase_gap = np.angle(z * np.exp(-1j * self.mean_phase_threshold))
+            # print(np.abs(phase_gap), self.mean_phase_tolerance, self.prediction_error, self.error_tolerance)
             self.frozen = bool(np.abs(phase_gap) < self.mean_phase_tolerance and self.prediction_error < self.error_tolerance)
 
         if save_history:
@@ -311,9 +320,6 @@ class SpikingNetwork:
         self.last_spike = np.ones(self.num_links) * -np.inf
         self.last_isi = np.ones(self.num_links) * np.nan
         self.frozen = False
-
-        self.dt_link = self.reference_period(self.I_bias + self.g_drive * 0.5, h=h_max) * self.omega0 / (2 * np.pi)
-        self.n_sub = int(np.ceil(self.dt_link/h_max))
 
     def spike_phase(self):
         return 2 * np.pi * np.mod((self.link_time - self.last_spike)/self.last_isi, 1.0)
