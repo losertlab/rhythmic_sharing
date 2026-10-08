@@ -51,9 +51,10 @@ class SpikingNetwork:
         self.num_links = np.count_nonzero(self.node_adj_matrix.toarray())
         self.link_adj_matrix, self.link_adj_norm = self.gen_link_adj_matrix()
 
-        h_max = 0.1
-        self.dt_link = self.reference_period(self.I_bias + self.g_drive * 0.5, h=h_max) * self.omega0 / (2 * np.pi)
-        self.n_sub = int(np.ceil(self.dt_link/h_max))
+        self.h_max = 0.1
+        self.I_ref = self.I_bias + self.g_drive * 0.5
+        self.dt_link = self.reference_period(self.I_ref, h=self.h_max) * self.omega0 / (2 * np.pi)
+        self.n_sub = int(np.ceil(self.dt_link/self.h_max))
 
         self.reset_initial_states()
         self.reset_history()
@@ -142,35 +143,36 @@ class SpikingNetwork:
             self.training_data_history.append(np.copy(input_state))
 
     def advance_links(self, save_history=True, freezing=False):
-        if freezing and self.frozen:
-            if save_history:
-                self.link_states_history.append(np.copy(self.link_states))
-                self.link_phase_history.append(self.spike_phase())
-            return
+        if not freezing:
+            I_drive = self.g_drive * (self.incidence_T @ ((self.node_states + 1)/2)) * (1/self.incidence_norm)
+            self.integrate_and_update(self.I_bias + I_drive, not freezing)
+            phase = self.spike_phase()
+        else:
+            if self.link_phase is None:
+                self.link_phase = self.spike_phase()
+                print("Getting initial frozen phase: %.2f%% undefined" % ((np.sum(~np.isfinite(self.link_phase))/len(self.link_phase)) * 100))
 
-        # if not freezing:
-        #     I_drive = self.g_drive * (self.incidence_T @ ((self.node_states + 1)/2)) * (1/self.incidence_norm)
-        #     I_ext = self.I_bias + I_drive
-        #     self.integrate_and_update(I_ext, True)
-        # else:
-        #     I_ext = (self.I_bias + 0.5 * self.g_drive) * np.ones(self.num_links)
-        #     self.integrate_and_update(I_ext, False)
+            if not self.frozen:
+                gap_before = self.mean_phase_gap()
+                self.link_phase = np.mod(self.link_phase + self.omega0, 2 * np.pi)
+                gap_after = self.mean_phase_gap()
 
-        I_drive = self.g_drive * (self.incidence_T @ ((self.node_states + 1)/2)) * (1/self.incidence_norm)
-        I_ext = self.I_bias + I_drive
-        self.integrate_and_update(I_ext, not freezing)
+                crossed = gap_before < 0 <= gap_after and gap_after - gap_before < np.pi
+                if crossed and self.prediction_error < self.error_tolerance:
+                    self.link_phase = np.mod(self.link_phase - gap_after, 2 * np.pi)
+                    self.frozen = True
+                    print("Frozen = True")
 
-        phase = self.spike_phase()
-        if freezing:
-            z = np.nanmean(np.exp(1j * phase)) if np.any(~np.isnan(phase)) else np.nan
-            phase_gap = np.angle(z * np.exp(-1j * self.mean_phase_threshold))
-            # print(np.abs(phase_gap), self.mean_phase_tolerance, self.prediction_error, self.error_tolerance)
-            self.frozen = bool(np.abs(phase_gap) < self.mean_phase_tolerance and self.prediction_error < self.error_tolerance)
-
+            defined = ~np.isnan(self.link_phase)
+            self.link_states[defined, 0] = self.phase_to_cycle(self.v_cycle)[defined]
+            self.link_states[defined, 1] = self.phase_to_cycle(self.n_cycle)[defined]
+            # self.link_states = np.stack([self.phase_to_cycle(self.v_cycle), self.phase_to_cycle(self.n_cycle)], axis=1)
+            phase = self.link_phase
+ 
         if save_history:
             self.link_states_history.append(np.copy(self.link_states))
-            self.link_phase_history.append(phase)
-
+            self.link_phase_history.append(np.copy(phase))
+        
     def advance(self, input_state, save_history=True, freezing=False):
         self.advance_nodes(input_state, save_history=save_history)
         self.advance_links(save_history=save_history, freezing=freezing)
@@ -247,7 +249,7 @@ class SpikingNetwork:
         self.prediction_history.append(output)
         return output
 
-    def predict(self, test_data, warmup_time=0, freezing_time=float('inf')):
+    def predict(self, test_data, warmup_time=0):
         prediction_time = test_data.shape[1] - warmup_time
         
         self.reset_initial_states()
@@ -255,14 +257,34 @@ class SpikingNetwork:
         
         for t in range(warmup_time):
             self.compute_predict_error(test_data[:, t])
-            self.advance(test_data[:, t], freezing=(t >= freezing_time))
+            self.advance(test_data[:, t], freezing=False)
             self.get_output()
+
+        rs = self.get_global_parameters()[0]
+        assert len(rs) > (2 * 3 * 2 * np.pi)/self.omega0
+        rs = rs[int((3 * 2 * np.pi)/self.omega0):]
+        self.r_target = np.nanmean(rs[-int((3 * 2 * np.pi)/self.omega0):])
+
+        print("R_target = %.4f" % self.r_target)
+
+        prev_r = rs[-1]
+        for cross_t in range(warmup_time, warmup_time+prediction_time):
+            self.advance(test_data[:, cross_t], freezing=False)
+            self.get_output()
+            r = np.abs(np.nanmean(np.exp(1j * np.asarray(self.link_phase_history[-1]))))
+            if prev_r < self.r_target < r or prev_r > self.r_target > r:
+                print("Cross (t=%d): prev_r = %.4f, r = %.4f" % (cross_t, prev_r, r))
+                break
+            # print("No cross: prev_r = %.4f, r = %.4f" % (prev_r, r))
+            prev_r = r
+
+        self.v_cycle, self.n_cycle = self.reference_cycle(self.I_ref, h=self.h_max)
             
-        for t in range(warmup_time, warmup_time+prediction_time):
+        for t in range(cross_t, warmup_time + prediction_time):
             self.advance(self.prediction_history[-1], freezing=True)
             self.get_output()
 
-        return np.asarray(self.prediction_history[warmup_time-1:-1]).T
+        return np.asarray(self.prediction_history[cross_t - 1:-1]).T
 
     # Neuron model helper functions
     def rk4_substep(self, v, n, I_ext, h=0.1, tau_syn=2):
@@ -292,6 +314,24 @@ class SpikingNetwork:
             raise ValueError("I_ref %.3f does not fire, raise g_drive or I_bias" % I_ref)
         return np.mean(np.diff(spikes))
 
+    def reference_cycle(self, I_ref, t_trans=1000, h=0.1):
+        v, n, t = np.asarray([-60.0]), np.asarray([0.0]), 0.0
+        while t < t_trans:
+            v, n = self.rk4_substep(v, n, I_ref, h=h)
+            t += h
+ 
+        crossings, v_samples, n_samples = 0, [], []
+        while crossings < 2:
+            v_new, n = self.rk4_substep(v, n, I_ref, h=h)
+            if v[0] < 0.0 <= v_new[0]:
+                crossings += 1
+            if crossings == 1:
+                v_samples.append(v_new[0])
+                n_samples.append(n[0])
+            v = v_new
+
+        return np.asarray(v_samples), np.asarray(n_samples)
+
     def integrate_and_update(self, I_ext, coupled):
         h = self.dt_link/self.n_sub
         v, n = self.link_states[:, 0], self.link_states[:, 1]
@@ -320,10 +360,36 @@ class SpikingNetwork:
         self.last_spike = np.ones(self.num_links) * -np.inf
         self.last_isi = np.ones(self.num_links) * np.nan
         self.frozen = False
+        self.link_phase = None
 
     def spike_phase(self):
-        return 2 * np.pi * np.mod((self.link_time - self.last_spike)/self.last_isi, 1.0)
+        phase = 2 * np.pi * np.mod((self.link_time - self.last_spike)/self.last_isi, 1.0)
+        phase[~np.isfinite(self.last_isi)] = np.nan
+        return phase
 
     def silent_links(self, silence_factor=2.0):
         return ~((self.link_time - self.last_spike) < silence_factor * self.last_isi)
+
+    def mean_phase_gap(self):
+        z = np.mean(np.exp(1j * self.link_phase))
+        return np.angle(z * np.exp(-1j * self.mean_phase_threshold))
+ 
+    def phase_to_cycle(self, cycle):
+        grid = 2 * np.pi * np.arange(len(cycle)) / len(cycle)
+        return np.interp(self.link_phase, grid, cycle, period=2 * np.pi)
+
+    # def initial_frozen_phase(self):
+    #     phase = self.spike_phase()
+
+    #     undefined = ~np.isfinite(self.last_isi)
+    #     print("Getting initial frozen phase: %.2f%% undefined" % ((np.sum(undefined)/len(undefined)) * 100))
+    #     if np.any(undefined):
+    #         v_scale = np.ptp(self.v_cycle)
+    #         n_scale = np.ptp(self.n_cycle)
+    #         dv = (self.link_states[undefined, 0][:, None] - self.v_cycle[None, :]) / v_scale
+    #         dn = (self.link_states[undefined, 1][:, None] - self.n_cycle[None, :]) / n_scale
+    #         idx = np.argmin(dv**2 + dn**2, axis=1)
+    #         phase[undefined] = 2 * np.pi * idx / len(self.v_cycle)
+
+    #     return phase
 
