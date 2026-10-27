@@ -285,5 +285,47 @@ class RhythmicNetwork:
             self.get_output()
 
         return np.asarray(self.prediction_history[warmup_time-1:-1]).T
-            
+    
+    def predict_search(self, test_data, warmup_time, reentrain_time=50, prediction_time=None,
+                       search_time=None, smooth=1, seed_offset=2):
+        """Kang & Losert App. A2c: (1) run links with test data until R ~ R0; (2) rigid rotation g = omega0
+        (Eq. A5) for one full turn, Psi_0 = argmin open-loop one-step error (Eq. A6); (3) freeze at Psi_0 (g = 0),
+        re-entrain nodes open loop, then closed loop."""
+        if search_time is None:
+            search_time = int(np.ceil(2 * np.pi / (self.dt * self.omega0)))
+        if prediction_time is None:
+            prediction_time = test_data.shape[1] - warmup_time - search_time - reentrain_time
+        assert test_data.shape[1] >= warmup_time + search_time + reentrain_time + 1, "test_data too short"
+
+        self.reset_initial_states(seed_offset=seed_offset)
+        self.reset_history()
+        self.frozen = False
+
+        # 1. links and nodes driven by the data
+        for t in range(warmup_time):
+            self.advance(test_data[:, t], save_history=False)
+
+        # 2. rigid rotation (R fixed), record one-step error at each mean phase
+        t, errs, snaps = warmup_time, [], []
+        for _ in range(search_time):
+            self.link_states = self.link_states + self.dt * self.omega0
+            self.advance_nodes(test_data[:, t], save_history=False)
+            errs.append(np.linalg.norm(self.output_weights @ self.node_states - test_data[:, t + 1]))
+            snaps.append(np.copy(self.link_states))
+            t += 1
+        errs = np.convolve(errs, np.ones(smooth) / smooth, mode="same") if smooth > 1 else np.asarray(errs)
+        self.link_states = snaps[int(np.argmin(errs))]
+        self.frozen = True
+        self.psi0 = np.angle(np.mean(np.exp(1j * self.link_states)))
+
+        # 3. re-entrain under the frozen configuration, then closed loop (links held)
+        for _ in range(reentrain_time):
+            self.advance_nodes(test_data[:, t], save_history=False)
+            t += 1
+        out, preds = self.output_weights @ self.node_states, np.empty((self.input_dims, prediction_time))
+        for k in range(prediction_time):
+            preds[:, k] = out
+            self.advance_nodes(out, save_history=False)
+            out = self.output_weights @ self.node_states
+        return preds, t
 
