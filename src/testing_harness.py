@@ -50,8 +50,11 @@ def link_cost(net, n_steps):
 	}
 
 # Spiking network harness
-def spk_train(_, seed, c, train, warm_time, save_hist=False):
-	net = SpikingNetwork(model_seed=seed, link_strength_change_ratio=c)
+def spk_train(_, seed, c, train, warm_time, I_ref=None, save_hist=False):
+	if I_ref:
+		net = SpikingNetwork(model_seed=seed, link_strength_change_ratio=c, I_ref=I_ref)
+	else:
+		net = SpikingNetwork(model_seed=seed, link_strength_change_ratio=c)
 	net.train(train, warmup_time=warm_time)
 	W = ridge_sweep(net)
 	if not save_hist:

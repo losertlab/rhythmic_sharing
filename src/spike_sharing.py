@@ -59,10 +59,10 @@ class SpikingNetwork:
 		self.link_adj_matrix, self.link_adj_deg = self.gen_link_adj_matrix()
 
 		# Link time scale and reference cycle
-		self.T_ref = self.reference_period(self.I_ref, h=H_MAX)
+		self.T_ref = self.reference_period(h=H_MAX)
 		self.dt_link = self.T_ref * self.omega0 / (2 * np.pi)
 		self.n_sub = int(np.ceil(self.dt_link / H_MAX))
-		v_cyc, n_cyc = self.reference_cycle(self.I_ref, h=H_MAX)
+		v_cyc, n_cyc = self.reference_cycle(h=H_MAX)
 		idx = np.linspace(0, len(v_cyc), CYCLE_POINTS, endpoint=False).astype(int)
 		self.v_cycle, self.n_cycle = v_cyc[idx], n_cyc[idx]
 		self.v_scale, self.n_scale = np.ptp(self.v_cycle), np.ptp(self.n_cycle)
@@ -265,29 +265,30 @@ class SpikingNetwork:
 			
 		return v, n
 
-	def reference_period(self, I_ref, t_trans=1000, t_meas=1500, h=H_MAX):
+	def reference_period(self, t_trans=1000, t_meas=1500, h=H_MAX):
 		v, n = np.asarray([-60.0]), np.asarray([0.0])
 		t, spikes = 0, []
 
 		while t < t_trans + t_meas:
-			v_new, n = self.rk4_substep(v, n, I_ref, h=h)
+			v_new, n = self.rk4_substep(v, n, self.I_ref, h=h)
 			if v[0] < 0.0 <= v_new[0] and t > t_trans:
 				spikes.append((t + h * (-v[0]))/(v_new[0] - v[0]))
+				# spikes.append(t + h * (-v[0]) / (v_new[0] - v[0]))
 			v, t = v_new, t + h
 
 		if len(spikes) < 2:
-			raise ValueError("I_ref %.3f does not fire, raise it" % I_ref)
+			raise ValueError("I_ref %.3f does not fire, raise it" % self.I_ref)
 		return np.mean(np.diff(spikes))
 
-	def reference_cycle(self, I_ref, t_trans=1000, h=H_MAX):
+	def reference_cycle(self, t_trans=1000, h=H_MAX):
 		v, n, t = np.asarray([-60.0]), np.asarray([0.0]), 0.0
 		while t < t_trans:
-			v, n = self.rk4_substep(v, n, I_ref, h=h)
+			v, n = self.rk4_substep(v, n, self.I_ref, h=h)
 			t += h
  
 		crossings, v_samples, n_samples = 0, [], []
 		while crossings < 2:
-			v_new, n = self.rk4_substep(v, n, I_ref, h=h)
+			v_new, n = self.rk4_substep(v, n, self.I_ref, h=h)
 			if v[0] < 0.0 <= v_new[0]:
 				crossings += 1
 			if crossings == 1:
